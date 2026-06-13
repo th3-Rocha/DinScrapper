@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "38487145396",
+    "project_id": "jobnator-9f538",
+    "storage_bucket": "jobnator-9f538.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:38487145396:android:d6e22e6e2d2851739d10e1",
+        "android_client_info": {
+          "package_name": "com.dknoob.jobnator"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAdeNHkR2-_rXs3Hf2kkPV10FlERP4mkS0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
