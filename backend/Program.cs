@@ -78,34 +78,45 @@ app.MapPost("/api/settings", async (AppDbContext db, SearchSettings newSettings)
     return Results.Ok(settings);
 });
 
+string qrCodeAsciiGlobal = "";
+byte[] qrCodeImageGlobal = Array.Empty<byte>();
 
-string localIp = "";
-var host = await Dns.GetHostEntryAsync(Dns.GetHostName());
-foreach (var ip in host.AddressList)
+string backendUrlGlobal = Environment.GetEnvironmentVariable("PUBLIC_URL");
+
+if (string.IsNullOrEmpty(backendUrlGlobal))
 {
-    if (ip.AddressFamily == AddressFamily.InterNetwork && !ip.ToString().StartsWith("127."))
+    string localIp = "";
+    var host = await Dns.GetHostEntryAsync(Dns.GetHostName());
+    foreach (var ip in host.AddressList)
     {
-        localIp = ip.ToString();
-        break;
+        if (ip.AddressFamily == AddressFamily.InterNetwork && !ip.ToString().StartsWith("127."))
+        {
+            localIp = ip.ToString();
+            break;
+        }
+    }
+
+    if (!string.IsNullOrEmpty(localIp))
+    {
+
+        backendUrlGlobal = $"http://{localIp}:5056";
     }
 }
 
-string qrCodeAsciiGlobal = "";
-string backendUrlGlobal = "";
-
-if (!string.IsNullOrEmpty(localIp))
+if (!string.IsNullOrEmpty(backendUrlGlobal))
 {
-    backendUrlGlobal = $"http://{localIp}:{port}";
-
     using var qrGenerator = new QRCodeGenerator();
     using var qrCodeData = qrGenerator.CreateQrCode(backendUrlGlobal, QRCodeGenerator.ECCLevel.Q);
-    using var qrCode = new AsciiQRCode(qrCodeData);
 
-    qrCodeAsciiGlobal = qrCode.GetGraphic(1);
+    using var asciiQrCode = new AsciiQRCode(qrCodeData);
+    qrCodeAsciiGlobal = asciiQrCode.GetGraphic(1);
+
+    using var pngQrCode = new PngByteQRCode(qrCodeData);
+    qrCodeImageGlobal = pngQrCode.GetGraphic(20);
 
     Console.WriteLine("\n==================================================");
-    Console.WriteLine($"🔗 URL de Conexão: {backendUrlGlobal}");
-    Console.WriteLine("📱 Aponte a câmera do aplicativo para o QR Code abaixo:");
+    Console.WriteLine($"🔗 URL de Conexão Ativa: {backendUrlGlobal}");
+    Console.WriteLine($"🌐 Acesse no navegador: {backendUrlGlobal}/api/qrcode");
     Console.WriteLine("==================================================\n");
     Console.WriteLine(qrCodeAsciiGlobal);
     Console.WriteLine("==================================================\n");
@@ -113,15 +124,10 @@ if (!string.IsNullOrEmpty(localIp))
 
 app.MapGet("/api/qrcode", () =>
 {
-    if (string.IsNullOrEmpty(backendUrlGlobal))
-        return Results.Problem("Não foi possível determinar o IP local do servidor.");
+    if (qrCodeImageGlobal.Length == 0)
+        return Results.Problem("Não foi possível gerar o QR Code (URL não definida).");
 
-    return Results.Ok(new
-    {
-        url = backendUrlGlobal,
-        qrcode = qrCodeAsciiGlobal
-    });
+    return Results.File(qrCodeImageGlobal, "image/png");
 });
-
 
 app.Run();
