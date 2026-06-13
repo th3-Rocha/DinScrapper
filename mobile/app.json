@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Jobnator",
-    "slug": "mobile",
+    "slug": "Jobnator",
     "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -20,7 +20,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.dknoob.mobile"
+      "package": "com.dknoob.jobnator"
     },
     "web": {
       "output": "static",
@@ -52,11 +52,7 @@
       "reactCompiler": true
     },
     "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "6f7f6252-6a84-4f6f-89ef-8fb8d3f79b06"
-      }
-    },
-    "owner": "dknoob"
+      "router": {}
+    }
   }
 }
