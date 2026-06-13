@@ -198,6 +198,10 @@ app.MapPost("/api/scraper/run", async (ScraperTriggerService trigger) =>
 });
 
 app.MapGet("/api/scraper/status", (ScraperTriggerService trigger) =>
-    Results.Ok(new { isScraping = trigger.IsScraping }));
+    Results.Ok(new
+    {
+        isScraping = trigger.IsScraping,
+        lastResult = trigger.LastResult
+    }));
 
 app.Run();

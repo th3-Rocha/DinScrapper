@@ -224,6 +224,7 @@ export function useSettings() {
 
   /**
    * POST /api/scraper/run — dispara uma raspagem imediata no servidor.
+   * Faz polling em /api/scraper/status por até 30 s para capturar o resultado.
    */
   const triggerScrape = useCallback(async (): Promise<{
     ok: boolean;
@@ -232,19 +233,79 @@ export function useSettings() {
     if (!apiUrl) return { ok: false, message: "API URL not configured" };
     setScraping(true);
     try {
+      // Dispara o scrape
       const res = await axios.post(
         `${apiUrl}/api/scraper/run`,
         {},
         { timeout: 8000 },
       );
+
+      if (res.data?.alreadyRunning) {
+        return { ok: true, message: "Scraper already running…" };
+      }
+
+      // Polling por até 30s (15 checks × 2s) para capturar o resultado rapidamente.
+      // Se o scrape demorar mais, retorna mensagem de "em andamento".
+      for (let i = 0; i < 15; i++) {
+        await new Promise<void>((r) => setTimeout(r, 2000));
+        try {
+          const status = await axios.get(`${apiUrl}/api/scraper/status`, {
+            timeout: 3000,
+          });
+          const data = status.data;
+
+          if (!data?.isScraping) {
+            const last = data?.lastResult;
+            if (!last) return { ok: true, message: "Scrape completed." };
+
+            switch (last.status as string) {
+              case "ok":
+                return {
+                  ok: true,
+                  message:
+                    last.jobsNew > 0
+                      ? `${last.jobsNew} new job${last.jobsNew !== 1 ? "s" : ""} found!`
+                      : "Done — no new jobs this time.",
+                };
+              case "auth_wall":
+                return {
+                  ok: false,
+                  message: "🔒 LinkedIn blocked: login wall detected.",
+                };
+              case "captcha":
+                return {
+                  ok: false,
+                  message: "🤖 LinkedIn blocked: CAPTCHA detected.",
+                };
+              case "empty":
+                return {
+                  ok: false,
+                  message: "⚠ No job cards found — selectors may have changed.",
+                };
+              case "timeout":
+                return {
+                  ok: false,
+                  message: "⏱ LinkedIn navigation timed out.",
+                };
+              default:
+                return {
+                  ok: false,
+                  message: last.errorMessage ?? "Scrape failed.",
+                };
+            }
+          }
+        } catch {
+          // Falha de rede durante polling — continua tentando
+        }
+      }
+
+      // Após 30s ainda está rodando — retorna feedback positivo e para o spinner
       return {
         ok: true,
-        message: res.data?.alreadyRunning
-          ? "Scraper already running…"
-          : "Scrape started! Jobs will appear in a few minutes.",
+        message: "Scraping in progress… Jobs will appear soon.",
       };
     } catch {
-      return { ok: false, message: "Failed to trigger scrape" };
+      return { ok: false, message: "Failed to trigger scrape." };
     } finally {
       setScraping(false);
     }
