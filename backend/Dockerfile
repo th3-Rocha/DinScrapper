@@ -6,7 +6,7 @@ RUN dotnet restore
 RUN dotnet publish -c Release -o /app/publish -r linux-x64 --self-contained true
 
 # 2. Fase de Execução (Imagem do Playwright mais recente)
-FROM mcr.microsoft.com/playwright/dotnet:jammy AS final
+FROM mcr.microsoft.com/playwright/dotnet:v1.60.0-noble AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 

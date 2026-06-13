@@ -25,6 +25,13 @@ const DEFAULT_SETTINGS: JobSettings = {
   scrapeIntervalMinutes: 30,
 };
 
+/** Trunca o token para exibição: ExponentPushToken[...últimos8] */
+function formatTokenPreview(token: string): string {
+  const m = token.match(/^(ExponentPushToken\[)(.+)(\])$/);
+  if (!m) return `${token.slice(0, 22)}\u2026`;
+  return `${m[1]}\u2026${m[2].slice(-8)}${m[3]}`;
+}
+
 export function useSettings() {
   const {
     apiUrl,
@@ -40,6 +47,8 @@ export function useSettings() {
   const [scraping, setScraping] = useState(false);
   const [tokenRegistered, setTokenRegistered] = useState(false);
   const [tokenSaving, setTokenSaving] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [tokenPreview, setTokenPreview] = useState<string | null>(null);
 
   /** GET /api/settings — pulls current backend config into local state */
   const fetchSettings = useCallback(
@@ -57,7 +66,9 @@ export function useSettings() {
           scrapeIntervalMinutes: (Number(data.scrapeIntervalMinutes) ||
             30) as ScrapeInterval,
         });
-        setTokenRegistered(!!data.expoPushToken);
+        const tok: string = data.expoPushToken ?? "";
+        setTokenRegistered(!!tok);
+        setTokenPreview(tok ? formatTokenPreview(tok) : null);
       } catch (e) {
         console.warn("Failed to fetch settings:", e);
         // Non-fatal: keep defaults / previous values so the form is still usable
@@ -90,18 +101,17 @@ export function useSettings() {
    * Returns null if the user denies permission or it's unavailable
    * (e.g. on a simulator).
    */
-  const registerPushToken = useCallback(async (): Promise<string | null> => {
-    // expo-notifications throws at import-time in Expo Go (SDK 53+).
-    // By using require() lazily here — after the IS_DEV guard — the module
-    // is never loaded in development, so Expo Go never crashes.
+  const registerPushToken = useCallback(async (): Promise<{
+    token: string | null;
+    error: string | null;
+  }> => {
     if (IS_DEV) {
-      console.log("[dev] Push notifications skipped in development mode");
-      return null;
+      return { token: null, error: "Notifications disabled in dev mode" };
     }
 
-    // Lazy requires — only evaluated in real (non-Expo-Go) builds
+    // Lazy requires — não carregados no Expo Go, apenas em builds reais
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Notifications =
+    const Notif =
       require("expo-notifications") as typeof import("expo-notifications");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Constants = (
@@ -109,41 +119,49 @@ export function useSettings() {
     ).default;
 
     try {
-      const { status: existingStatus } =
-        await Notifications.getPermissionsAsync();
-      let finalStatus = existingStatus;
-
-      if (existingStatus !== "granted") {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
+      // 1. Verifica / pede permissão
+      const { status: existing } = await Notif.getPermissionsAsync();
+      let final = existing;
+      if (existing !== "granted") {
+        const { status } = await Notif.requestPermissionsAsync();
+        final = status;
+      }
+      if (final !== "granted") {
+        return {
+          token: null,
+          error:
+            "Permission denied \u2014 enable notifications in device Settings > Apps.",
+        };
       }
 
-      if (finalStatus !== "granted") {
-        console.warn("Push notification permission was not granted");
-        return null;
-      }
-
+      // 2. Canal Android
       if (Platform.OS === "android") {
-        await Notifications.setNotificationChannelAsync("default", {
-          name: "default",
-          importance: Notifications.AndroidImportance.DEFAULT,
+        await Notif.setNotificationChannelAsync("default", {
+          name: "JobNator Alerts",
+          importance: Notif.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: "#208AEF",
         });
       }
 
-      // Required for SDK 49+ when using EAS — falls back to undefined
-      // for bare/dev setups without a configured project id.
+      // 3. Obtém o Expo Push Token
       const projectId =
         Constants.expoConfig?.extra?.eas?.projectId ??
         Constants.easConfig?.projectId;
 
-      const tokenResponse = await Notifications.getExpoPushTokenAsync(
-        projectId ? { projectId } : undefined,
-      );
+      if (!projectId) {
+        return {
+          token: null,
+          error: "EAS projectId not found in app config.",
+        };
+      }
 
-      return tokenResponse.data;
-    } catch (e) {
-      console.warn("Failed to get Expo push token:", e);
-      return null;
+      const resp = await Notif.getExpoPushTokenAsync({ projectId });
+      return { token: resp.data, error: null };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[registerPushToken] error:", msg);
+      return { token: null, error: msg };
     }
   }, []);
 
@@ -161,7 +179,10 @@ export function useSettings() {
       setError(null);
 
       try {
-        const pushToken = await registerPushToken();
+        const { token: pushToken, error: pushError } =
+          await registerPushToken();
+
+        if (pushError && !IS_DEV) setTokenError(pushError);
 
         const payload = {
           keywords: newSettings.keywords.trim(),
@@ -177,7 +198,11 @@ export function useSettings() {
         });
 
         setSettings(newSettings);
-        if (pushToken) setTokenRegistered(true);
+        if (pushToken) {
+          setTokenRegistered(true);
+          setTokenPreview(formatTokenPreview(pushToken));
+          setTokenError(null);
+        }
         return true;
       } catch (e) {
         setError(
@@ -311,6 +336,47 @@ export function useSettings() {
     }
   }, [apiUrl]);
 
+  /**
+   * Registra o push token de forma independente (sem precisar salvar os outros settings).
+   * Útil para o botão "Register" na UI de settings.
+   */
+  const registerTokenOnly = useCallback(async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    if (!apiUrl) return { ok: false, message: "API URL not configured" };
+    if (IS_DEV) return { ok: false, message: "Disabled in dev mode" };
+
+    setTokenSaving(true);
+    try {
+      const { token, error } = await registerPushToken();
+      if (error || !token) {
+        setTokenError(error ?? "Unknown error");
+        return { ok: false, message: error ?? "Failed to get push token" };
+      }
+
+      await axios.post(
+        `${apiUrl}/api/settings/push-token`,
+        { expoPushToken: token },
+        { timeout: 10000 },
+      );
+
+      setTokenRegistered(true);
+      setTokenPreview(formatTokenPreview(token));
+      setTokenError(null);
+      return { ok: true, message: "Push notifications registered!" };
+    } catch (e: unknown) {
+      const msg =
+        axios.isAxiosError(e) && e.response?.data?.error
+          ? e.response.data.error
+          : "Failed to register with backend";
+      setTokenError(msg);
+      return { ok: false, message: msg };
+    } finally {
+      setTokenSaving(false);
+    }
+  }, [apiUrl, registerPushToken]);
+
   return {
     // connection
     apiUrl,
@@ -329,7 +395,10 @@ export function useSettings() {
     scraping,
     triggerScrape,
     tokenRegistered,
+    tokenError,
+    tokenPreview,
     tokenSaving,
+    registerTokenOnly,
     sendTestNotification,
   };
 }

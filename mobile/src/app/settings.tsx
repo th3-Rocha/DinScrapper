@@ -144,7 +144,10 @@ export default function SettingsScreen() {
     scraping,
     triggerScrape,
     tokenRegistered,
+    tokenError,
+    tokenPreview,
     tokenSaving,
+    registerTokenOnly,
     sendTestNotification,
   } = useSettings();
 
@@ -493,22 +496,60 @@ export default function SettingsScreen() {
 
         {/* Push notification status */}
         <View style={styles.notifCard}>
+          {/* Status row */}
           <View style={styles.notifRow}>
             <View
               style={[
                 styles.notifDot,
-                { backgroundColor: tokenRegistered ? "#4ade80" : "#555" },
+                {
+                  backgroundColor: IS_DEV
+                    ? "#444"
+                    : tokenRegistered
+                      ? "#4ade80"
+                      : "#f87171",
+                },
               ]}
             />
             <Text style={styles.notifLabel}>
               {IS_DEV
                 ? "Push notifications disabled in dev mode"
                 : tokenRegistered
-                  ? "Push notifications registered ✓"
-                  : "Push notifications not registered — save settings first"}
+                  ? "Push notifications active ✓"
+                  : "Push notifications not registered"}
             </Text>
           </View>
 
+          {/* Token preview */}
+          {!IS_DEV && tokenPreview && (
+            <Text style={styles.tokenPreview} numberOfLines={1}>
+              {tokenPreview}
+            </Text>
+          )}
+
+          {/* Error reason */}
+          {!IS_DEV && !tokenRegistered && tokenError && (
+            <Text style={styles.notifError}>{tokenError}</Text>
+          )}
+
+          {/* Register button (shown when not registered and not in dev mode) */}
+          {!IS_DEV && !tokenRegistered && (
+            <TouchableOpacity
+              style={[styles.testButton, tokenSaving && { opacity: 0.6 }]}
+              onPress={async () => {
+                const result = await registerTokenOnly();
+                setTestResult(result);
+                setTimeout(() => setTestResult(null), 4000);
+              }}
+              disabled={tokenSaving}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.testButtonText}>
+                {tokenSaving ? "Registering…" : "Register push notifications"}
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Send test button (shown when registered) */}
           {!IS_DEV && tokenRegistered && (
             <TouchableOpacity
               style={[styles.testButton, tokenSaving && { opacity: 0.6 }]}
@@ -526,6 +567,7 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           )}
 
+          {/* Feedback */}
           {testResult && (
             <Text
               style={[
@@ -779,6 +821,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#888",
     lineHeight: 17,
+  },
+  tokenPreview: {
+    fontSize: 11,
+    color: "#4ade80",
+    fontFamily: "monospace",
+    letterSpacing: 0.2,
+    opacity: 0.8,
+  },
+  notifError: {
+    fontSize: 11,
+    color: "#f87171",
+    lineHeight: 16,
+    marginTop: 2,
   },
   testButton: {
     alignSelf: "stretch",

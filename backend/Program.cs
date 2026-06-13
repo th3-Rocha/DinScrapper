@@ -84,6 +84,26 @@ app.MapPost("/api/settings", async (AppDbContext db, SearchSettings newSettings)
     return Results.Ok(settings);
 });
 
+app.MapPost("/api/settings/push-token", async (AppDbContext db, PushTokenRequest req) =>
+{
+    if (string.IsNullOrEmpty(req.ExpoPushToken) || !req.ExpoPushToken.StartsWith("ExponentPushToken"))
+        return Results.BadRequest(new { error = "Token inválido ou ausente." });
+
+    var settings = await db.SearchSettings.FirstOrDefaultAsync();
+    if (settings == null)
+    {
+        settings = new SearchSettings { ExpoPushToken = req.ExpoPushToken };
+        db.SearchSettings.Add(settings);
+    }
+    else
+    {
+        settings.ExpoPushToken = req.ExpoPushToken;
+    }
+
+    await db.SaveChangesAsync();
+    return Results.Ok(new { message = "Push token atualizado.", tokenPreview = req.ExpoPushToken[..Math.Min(30, req.ExpoPushToken.Length)] + "..." });
+});
+
 string qrCodeAsciiGlobal = "";
 byte[] qrCodeImageGlobal = Array.Empty<byte>();
 
@@ -205,3 +225,5 @@ app.MapGet("/api/scraper/status", (ScraperTriggerService trigger) =>
     }));
 
 app.Run();
+
+record PushTokenRequest(string ExpoPushToken);
