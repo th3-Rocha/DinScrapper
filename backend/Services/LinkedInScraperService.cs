@@ -49,9 +49,6 @@ public class LinkedInScraperService : BackgroundService
         using var scope = _serviceProvider.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // =========================================================
-        // 🧹 FAXINA: Deleta vagas com mais de 24 horas (Performance máxima via ExecuteDeleteAsync)
-        // =========================================================
         var deletedCount = await db.Jobs
             .Where(j => j.DateScraped < DateTime.UtcNow.AddDays(-1))
             .ExecuteDeleteAsync();
@@ -61,9 +58,6 @@ public class LinkedInScraperService : BackgroundService
             _logger.LogInformation("🧹 Faxina: {Count} vagas antigas foram removidas do banco.", deletedCount);
         }
 
-        // =========================================================
-        // ⚙️ LER CONFIGURAÇÕES DO BANCO
-        // =========================================================
         var settings = await db.SearchSettings.FirstOrDefaultAsync() ?? new SearchSettings();
 
         string keyword = Uri.EscapeDataString(settings.Keywords);
@@ -73,7 +67,6 @@ public class LinkedInScraperService : BackgroundService
 
         string url = $"https://www.linkedin.com/jobs/search?keywords={keyword}&location={location}&f_TPR=r86400&f_WT={workplaceType}";
 
-        // ... O resto do seu código do Playwright continua exatamente igual ...
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
 
@@ -89,40 +82,30 @@ public class LinkedInScraperService : BackgroundService
         foreach (var card in jobCards)
         {
             string link = await card.GetAttributeAsync("href") ?? "";
-            link = link.Split('?')[0]; // Remove parâmetros de rastreio
-
-            // Extrai o ID numérico do LinkedIn direto da URL usando Regex (geralmente tem 8 a 10 dígitos)
+            link = link.Split('?')[0];
             var idMatch = Regex.Match(link, @"\d{8,10}");
             long linkedinId = idMatch.Success ? long.Parse(idMatch.Value) : 0;
 
-            // Verifica pelo Link OU pelo ID do LinkedIn para evitar duplicadas
             bool vagaExiste = db.Jobs.Any(j => j.LinkedInId == linkedinId || j.Link == link);
 
             if (!vagaExiste && linkedinId != 0)
             {
                 await detailPage.GotoAsync(link, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
                 await Task.Delay(1500);
-                // Extração dos elementos da página de detalhes
                 var titleElement = await detailPage.QuerySelectorAsync(".top-card-layout__title");
                 var companyElement = await detailPage.QuerySelectorAsync(".topcard__org-name-link");
                 var locationElement = await detailPage.QuerySelectorAsync(".topcard__flavor--bullet");
                 var timePostedElement = await detailPage.QuerySelectorAsync(".posted-time-ago__text");
                 var applicantCountElement = await detailPage.QuerySelectorAsync(".num-applicants__caption");
                 var descElement = await detailPage.QuerySelectorAsync(".description__text");
-
-                // Identifica se é "Candidatura Simplificada" (Easy Apply)
-                // O botão de aplicar do próprio LinkedIn costuma ter textos específicos ou abrir modais
-                // Identifica se é "Candidatura Simplificada" (Easy Apply) lendo todo o cabeçalho
                 var topCardElement = await detailPage.QuerySelectorAsync(".top-card-layout");
                 string topCardText = topCardElement != null ? await topCardElement.InnerTextAsync() : "";
 
                 bool isEasyApply = topCardText.Contains("Candidatura simplificada", StringComparison.OrdinalIgnoreCase) ||
                                    topCardText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
-                // Extrai todos os critérios da vaga (Tempo Integral, Pleno-Sênior, etc)
                 var criteriaElements = await detailPage.QuerySelectorAllAsync(".description__job-criteria-item");
                 string employmentType = "";
 
-                // No LinkedIn, o 2º item da lista (índice 1) costuma ser o "Tipo de Emprego"
                 if (criteriaElements.Count >= 2)
                 {
                     employmentType = await criteriaElements[1].InnerTextAsync();
@@ -131,33 +114,23 @@ public class LinkedInScraperService : BackgroundService
                 string tituloVaga = titleElement != null ? (await titleElement.InnerTextAsync()).Trim() : "";
                 string descricaoVaga = descElement != null ? (await descElement.InnerTextAsync()).Trim() : "";
 
-                // =========================================================
-                // 🛡️ PENEIRA DE OURO: Validação Estrita de Vaga
-                // =========================================================
                 string textoCompleto = (tituloVaga + " " + descricaoVaga).ToLower();
-
-                // Aqui você define as linguagens e frameworks que OBRIGATORIAMENTE
-                // precisam estar na vaga para valer a pena você se candidatar.
                 bool ehVagaDeDev = textoCompleto.Contains("c#") ||
                                    textoCompleto.Contains(".net") ||
                                    textoCompleto.Contains("asp.net") ||
                                    textoCompleto.Contains("backend developer");
 
-                // Palavras-chave negativas (se tiver isso no título, pula a vaga na hora)
                 bool ehVagaRuim = tituloVaga.ToLower().Contains("suporte") ||
                                   tituloVaga.ToLower().Contains("analista de suporte") ||
                                   tituloVaga.ToLower().Contains("help desk") ||
                                   tituloVaga.ToLower().Contains("vendas");
 
-                // Se não for vaga de dev, ou se for uma vaga ruim, ignora e vai para o próximo card
                 if (!ehVagaDeDev || ehVagaRuim)
                 {
                     _logger.LogWarning("❌ Vaga descartada (Fora do perfil): {Titulo}", tituloVaga);
-                    continue; // Pula todo o código de inserção e vai para a próxima
+                    continue;
                 }
-                // =========================================================
 
-                // Agora sim, você cria a entidade JobListing e salva no banco
                 var novaVaga = new JobListing
                 {
                     LinkedInId = linkedinId,
@@ -165,7 +138,6 @@ public class LinkedInScraperService : BackgroundService
                     Company = companyElement != null ? (await companyElement.InnerTextAsync()).Trim() : "Sem Empresa",
                     Location = locationElement != null ? (await locationElement.InnerTextAsync()).Trim() : "Sem Local",
 
-                    // Se passamos "2" no filtro, podemos forçar o dado como Remoto, ou ler do locationElement
                     WorkplaceType = workplaceType == "2" ? "Remoto" : (workplaceType == "3" ? "Híbrido" : "Presencial"),
                     EmploymentType = employmentType,
                     IsEasyApply = isEasyApply,

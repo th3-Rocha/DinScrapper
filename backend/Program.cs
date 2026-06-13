@@ -88,16 +88,13 @@ if (!string.IsNullOrEmpty(localIp))
 {
     string backendUrl = $"http://{localIp}:5056";
 
-    // Cria o gerador de QR Code
     using var qrGenerator = new QRCodeGenerator();
     using var qrCodeData = qrGenerator.CreateQrCode(backendUrl, QRCodeGenerator.ECCLevel.Q);
     using var qrCode = new AsciiQRCode(qrCodeData);
 
-    // Renderiza em formato de texto para o console do Linux
     string qrCodeAsAscii = qrCode.GetGraphic(1);
 
     Console.WriteLine("\n==================================================");
-    Console.WriteLine($"🚀 BACKEND DA PENEIRA DE OURO ONLINE!");
     Console.WriteLine($"🔗 URL de Conexão: {backendUrl}");
     Console.WriteLine("📱 Aponte a câmera do aplicativo para o QR Code abaixo:");
     Console.WriteLine("==================================================\n");
