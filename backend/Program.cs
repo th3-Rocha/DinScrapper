@@ -26,7 +26,8 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors("AllowAll");
-app.Urls.Add("http://0.0.0.0:5056");
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5056";
+app.Urls.Add($"http://0.0.0.0:{port}");
 app.MapGet("/api/jobs", async (AppDbContext db) =>
 {
     var jobs = await db.Jobs
