@@ -13,6 +13,7 @@ import {
 } from "expo-camera";
 import { X, ScanLine } from "lucide-react-native";
 import { T } from "../constants/theme";
+import { IS_DEV } from "../utils/environment";
 
 interface QRScannerProps {
   /** Called with the raw scanned string once a valid URL is detected */
@@ -32,6 +33,26 @@ export function QRScanner({
   subtitle = "Point the camera at the QR code shown by your backend",
   showCancel = true,
 }: QRScannerProps) {
+  // Safety guard — camera must not be rendered in Expo Go / dev mode
+  if (IS_DEV) {
+    return (
+      <View style={styles.center}>
+        <View style={styles.iconCircle}>
+          <ScanLine size={26} color={T.textMuted} />
+        </View>
+        <Text style={styles.title}>Camera disabled</Text>
+        <Text style={styles.subtitle}>
+          QR scanning is not available in development mode.
+        </Text>
+        {showCancel && (
+          <TouchableOpacity style={styles.secondaryButton} onPress={onClose}>
+            <Text style={styles.secondaryButtonText}>Go back</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
+
   const [permission, requestPermission] = useCameraPermissions();
   const [locked, setLocked] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -52,7 +73,7 @@ export function QRScanner({
       setErrorMsg(null);
       onScanned(raw);
     },
-    [locked, onScanned]
+    [locked, onScanned],
   );
 
   // Permission state still loading

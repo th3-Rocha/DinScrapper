@@ -3,45 +3,79 @@ using Backend.Data;
 using Backend.Models;
 using Microsoft.Playwright;
 using Microsoft.EntityFrameworkCore;
+
 namespace Backend.Services;
 
 public class LinkedInScraperService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<LinkedInScraperService> _logger;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ScraperTriggerService _triggerService;
 
-    public LinkedInScraperService(IServiceProvider serviceProvider, ILogger<LinkedInScraperService> logger)
+    public LinkedInScraperService(
+        IServiceProvider serviceProvider,
+        ILogger<LinkedInScraperService> logger,
+        IHttpClientFactory httpClientFactory,
+        ScraperTriggerService triggerService)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _httpClientFactory = httpClientFactory;
+        _triggerService = triggerService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        TimeSpan intervalo = TimeSpan.FromMinutes(30);
-        using var timer = new PeriodicTimer(intervalo);
-
-        do
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 _logger.LogInformation("==================================================");
                 _logger.LogInformation("🚀 [INÍCIO] Raspagem acionada às: {Time}", DateTime.Now.ToString("HH:mm:ss"));
 
+                _triggerService.SetScraping(true);
                 await ScrapeJobsAsync();
+                _triggerService.SetScraping(false);
 
-                var proximaExecucao = DateTime.Now.Add(intervalo);
+                // Lê o intervalo do banco após cada rodada — mudanças de settings entram no próximo ciclo
+                int intervalMinutes = 30;
+                using (var scope = _serviceProvider.CreateScope())
+                {
+                    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                    var s = await db.SearchSettings.FirstOrDefaultAsync(stoppingToken);
+                    if (s != null && s.ScrapeIntervalMinutes > 0)
+                        intervalMinutes = s.ScrapeIntervalMinutes;
+                }
 
+                var nextRun = DateTime.Now.AddMinutes(intervalMinutes);
                 _logger.LogInformation("✅ [FIM] Processo finalizado às: {Time}", DateTime.Now.ToString("HH:mm:ss"));
-                _logger.LogInformation("⏳ O robô entrou em repouso. Próxima busca programada para: {ProximaTime}", proximaExecucao.ToString("HH:mm:ss"));
+                _logger.LogInformation("⏳ Próxima busca em {Min}min, às {ProximaTime}", intervalMinutes, nextRun.ToString("HH:mm:ss"));
                 _logger.LogInformation("==================================================\n");
+
+                // Aguarda o intervalo OU um trigger manual — o que vier primeiro
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var delayTask = Task.Delay(TimeSpan.FromMinutes(intervalMinutes), waitCts.Token);
+                var triggerTask = _triggerService.Reader.WaitToReadAsync(waitCts.Token).AsTask();
+
+                await Task.WhenAny(delayTask, triggerTask);
+                await waitCts.CancelAsync(); // cancela o que não venceu
+
+                // Drena o canal para o próximo ciclo começar limpo
+                while (_triggerService.Reader.TryRead(out _)) { }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
             }
             catch (Exception ex)
             {
+                _triggerService.SetScraping(false);
                 _logger.LogError(ex, "❌ Erro durante a execução do Scraper.");
+                try { await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken); }
+                catch (OperationCanceledException) { break; }
             }
         }
-        while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
     private async Task ScrapeJobsAsync()
@@ -62,7 +96,9 @@ public class LinkedInScraperService : BackgroundService
 
         string keyword = Uri.EscapeDataString(settings.Keywords);
         string location = Uri.EscapeDataString(settings.Location);
-        string workplaceType = Uri.EscapeDataString(settings.WorkplaceType);
+        string workplaceType = settings.WorkplaceType.ToString();
+
+        // Pega o token dinâmico salvo no banco pelo seu aplicativo
         string expoPushToken = settings.ExpoPushToken;
 
         string url = $"https://www.linkedin.com/jobs/search?keywords={keyword}&location={location}&f_TPR=r86400&f_WT={workplaceType}";
@@ -75,7 +111,6 @@ public class LinkedInScraperService : BackgroundService
 
         await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
         var jobCards = await page.QuerySelectorAllAsync("a.base-card__full-link");
-
 
         int novasVagasCount = 0;
 
@@ -92,6 +127,7 @@ public class LinkedInScraperService : BackgroundService
             {
                 await detailPage.GotoAsync(link, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
                 await Task.Delay(1500);
+
                 var titleElement = await detailPage.QuerySelectorAsync(".top-card-layout__title");
                 var companyElement = await detailPage.QuerySelectorAsync(".topcard__org-name-link");
                 var locationElement = await detailPage.QuerySelectorAsync(".topcard__flavor--bullet");
@@ -103,6 +139,7 @@ public class LinkedInScraperService : BackgroundService
 
                 bool isEasyApply = topCardText.Contains("Candidatura simplificada", StringComparison.OrdinalIgnoreCase) ||
                                    topCardText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
+
                 var criteriaElements = await detailPage.QuerySelectorAllAsync(".description__job-criteria-item");
                 string employmentType = "";
 
@@ -111,40 +148,41 @@ public class LinkedInScraperService : BackgroundService
                     employmentType = await criteriaElements[1].InnerTextAsync();
                     employmentType = employmentType.Replace("Tipo de emprego", "").Replace("Employment type", "").Trim();
                 }
+
                 string tituloVaga = titleElement != null ? (await titleElement.InnerTextAsync()).Trim() : "";
                 string descricaoVaga = descElement != null ? (await descElement.InnerTextAsync()).Trim() : "";
 
-                string textoCompleto = (tituloVaga + " " + descricaoVaga).ToLower();
-                bool ehVagaDeDev = textoCompleto.Contains("c#") ||
-                                   textoCompleto.Contains(".net") ||
-                                   textoCompleto.Contains("asp.net") ||
-                                   textoCompleto.Contains("backend developer");
+                // ==========================================
+                // NOVO FILTRO: Limpa Lixo Universal
+                // ==========================================
+                string tituloLower = tituloVaga.ToLower();
 
-                bool ehVagaRuim = tituloVaga.ToLower().Contains("suporte") ||
-                                  tituloVaga.ToLower().Contains("analista de suporte") ||
-                                  tituloVaga.ToLower().Contains("help desk") ||
-                                  tituloVaga.ToLower().Contains("vendas");
+                bool ehVagaRuim = tituloLower.Contains("suporte") ||
+                                  tituloLower.Contains("analista de suporte") ||
+                                  tituloLower.Contains("help desk") ||
+                                  tituloLower.Contains("vendas") ||
+                                  tituloLower.Contains("atendimento") ||
+                                  tituloLower.Contains("professor") ||
+                                  tituloLower.Contains("tutor");
 
-                if (!ehVagaDeDev || ehVagaRuim)
+                if (ehVagaRuim)
                 {
-                    _logger.LogWarning("❌ Vaga descartada (Fora do perfil): {Titulo}", tituloVaga);
+                    _logger.LogWarning("❌ Vaga descartada (Lixo/Suporte/Vendas): {Titulo}", tituloVaga);
                     continue;
                 }
 
                 var novaVaga = new JobListing
                 {
                     LinkedInId = linkedinId,
-                    Title = titleElement != null ? (await titleElement.InnerTextAsync()).Trim() : "Sem Título",
+                    Title = tituloVaga != "" ? tituloVaga : "Sem Título",
                     Company = companyElement != null ? (await companyElement.InnerTextAsync()).Trim() : "Sem Empresa",
                     Location = locationElement != null ? (await locationElement.InnerTextAsync()).Trim() : "Sem Local",
-
                     WorkplaceType = workplaceType == "2" ? "Remoto" : (workplaceType == "3" ? "Híbrido" : "Presencial"),
                     EmploymentType = employmentType,
                     IsEasyApply = isEasyApply,
-
                     TimePosted = timePostedElement != null ? (await timePostedElement.InnerTextAsync()).Trim() : "",
                     ApplicantCount = applicantCountElement != null ? (await applicantCountElement.InnerTextAsync()).Trim() : "",
-                    Description = descElement != null ? (await descElement.InnerTextAsync()).Trim() : "",
+                    Description = descricaoVaga,
                     Link = link
                 };
 
@@ -152,19 +190,7 @@ public class LinkedInScraperService : BackgroundService
                 await db.SaveChangesAsync();
                 novasVagasCount++;
 
-
-                string seuExpoPushToken = "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]";
-
-                var pushMessage = new
-                {
-                    to = seuExpoPushToken,
-                    title = "🚨 Nova Vaga: " + novaVaga.Title,
-                    body = $"{novaVaga.Company} - {novaVaga.WorkplaceType}\nCandidaturas: {novaVaga.ApplicantCount}",
-                    data = new { urlVaga = novaVaga.Link }
-                };
-
-                using var httpClient = new HttpClient();
-                await httpClient.PostAsJsonAsync("https://exp.host/--/api/v2/push/send", pushMessage);
+                await SendPushNotificationAsync(expoPushToken, novaVaga);
 
                 await Task.Delay(2000);
             }
@@ -174,5 +200,44 @@ public class LinkedInScraperService : BackgroundService
         await page.CloseAsync();
 
         _logger.LogInformation("Raspagem concluída! {Count} novas vagas adicionadas.", novasVagasCount);
+    }
+
+    private async Task SendPushNotificationAsync(string expoPushToken, JobListing vaga)
+    {
+        if (string.IsNullOrEmpty(expoPushToken) || !expoPushToken.StartsWith("ExponentPushToken"))
+        {
+            _logger.LogInformation("🔕 Notificação ignorada: Push Token ausente ou inválido.");
+            return;
+        }
+
+        var pushMessage = new
+        {
+            to = expoPushToken,
+            title = "🚨 Nova Vaga: " + vaga.Title,
+            body = $"{vaga.Company} · {vaga.WorkplaceType}\n{vaga.ApplicantCount}",
+            data = new { urlVaga = vaga.Link }
+        };
+
+        try
+        {
+            var httpClient = _httpClientFactory.CreateClient();
+            var response = await httpClient.PostAsJsonAsync(
+                "https://exp.host/--/api/v2/push/send", pushMessage);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("🔔 Push enviado: {Title}", vaga.Title);
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("⚠️ Expo Push API retornou erro {Status}: {Body}",
+                    (int)response.StatusCode, body);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ Falha ao enviar push notification.");
+        }
     }
 }

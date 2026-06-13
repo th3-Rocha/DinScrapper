@@ -1,23 +1,28 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { Platform } from "react-native";
-//import * as Notifications from "expo-notifications";
-import Constants from "expo-constants";
+
 import { useApiUrl } from "./use-api-url";
+import { IS_DEV } from "../utils/environment";
 
 /** 1 = On-site, 2 = Remote, 3 = Hybrid (matches the C# backend enum) */
 export type WorkplaceType = 1 | 2 | 3;
+
+/** Intervalo em minutos entre raspagens automáticas */
+export type ScrapeInterval = 15 | 30 | 60 | 180;
 
 export interface JobSettings {
   keywords: string;
   location: string;
   workplaceType: WorkplaceType;
+  scrapeIntervalMinutes: ScrapeInterval;
 }
 
 const DEFAULT_SETTINGS: JobSettings = {
   keywords: "",
   location: "",
   workplaceType: 2,
+  scrapeIntervalMinutes: 30,
 };
 
 export function useSettings() {
@@ -32,6 +37,9 @@ export function useSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scraping, setScraping] = useState(false);
+  const [tokenRegistered, setTokenRegistered] = useState(false);
+  const [tokenSaving, setTokenSaving] = useState(false);
 
   /** GET /api/settings — pulls current backend config into local state */
   const fetchSettings = useCallback(
@@ -45,8 +53,11 @@ export function useSettings() {
         setSettings({
           keywords: data.keywords ?? "",
           location: data.location ?? "",
-          workplaceType: (data.workplaceType as WorkplaceType) ?? 2,
+          workplaceType: (Number(data.workplaceType) as WorkplaceType) ?? 2,
+          scrapeIntervalMinutes: (Number(data.scrapeIntervalMinutes) ||
+            30) as ScrapeInterval,
         });
+        setTokenRegistered(!!data.expoPushToken);
       } catch (e) {
         console.warn("Failed to fetch settings:", e);
         // Non-fatal: keep defaults / previous values so the form is still usable
@@ -80,37 +91,54 @@ export function useSettings() {
    * (e.g. on a simulator).
    */
   const registerPushToken = useCallback(async (): Promise<string | null> => {
+    // expo-notifications throws at import-time in Expo Go (SDK 53+).
+    // By using require() lazily here — after the IS_DEV guard — the module
+    // is never loaded in development, so Expo Go never crashes.
+    if (IS_DEV) {
+      console.log("[dev] Push notifications skipped in development mode");
+      return null;
+    }
+
+    // Lazy requires — only evaluated in real (non-Expo-Go) builds
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Notifications =
+      require("expo-notifications") as typeof import("expo-notifications");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Constants = (
+      require("expo-constants") as typeof import("expo-constants")
+    ).default;
+
     try {
-      // const { status: existingStatus } =
-      //   await Notifications.getPermissionsAsync();
-      // let finalStatus = existingStatus;
+      const { status: existingStatus } =
+        await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
 
-      // if (existingStatus !== "granted") {
-      //   const { status } = await Notifications.requestPermissionsAsync();
-      //   finalStatus = status;
-      // }
+      if (existingStatus !== "granted") {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
 
-      // if (finalStatus !== "granted") {
-      //   console.warn("Push notification permission was not granted");
-      //   return null;
-      // }
+      if (finalStatus !== "granted") {
+        console.warn("Push notification permission was not granted");
+        return null;
+      }
 
-      // if (Platform.OS === "android") {
-      //   await Notifications.setNotificationChannelAsync("default", {
-      //     name: "default",
-      //     importance: Notifications.AndroidImportance.DEFAULT,
-      //   });
-      // }
+      if (Platform.OS === "android") {
+        await Notifications.setNotificationChannelAsync("default", {
+          name: "default",
+          importance: Notifications.AndroidImportance.DEFAULT,
+        });
+      }
 
-      // // Required for SDK 49+ when using EAS — falls back to undefined
-      // // for bare/dev setups without a configured project id.
-      // const projectId =
-      //   Constants.expoConfig?.extra?.eas?.projectId ??
-      //   Constants.easConfig?.projectId;
+      // Required for SDK 49+ when using EAS — falls back to undefined
+      // for bare/dev setups without a configured project id.
+      const projectId =
+        Constants.expoConfig?.extra?.eas?.projectId ??
+        Constants.easConfig?.projectId;
 
-      // const tokenResponse = await Notifications.getExpoPushTokenAsync(
-      //   projectId ? { projectId } : undefined
-      // );
+      const tokenResponse = await Notifications.getExpoPushTokenAsync(
+        projectId ? { projectId } : undefined,
+      );
 
       return tokenResponse.data;
     } catch (e) {
@@ -139,6 +167,7 @@ export function useSettings() {
           keywords: newSettings.keywords.trim(),
           location: newSettings.location.trim(),
           workplaceType: newSettings.workplaceType,
+          scrapeIntervalMinutes: newSettings.scrapeIntervalMinutes,
           expoPushToken: pushToken,
           platform: Platform.OS,
         };
@@ -148,6 +177,7 @@ export function useSettings() {
         });
 
         setSettings(newSettings);
+        if (pushToken) setTokenRegistered(true);
         return true;
       } catch (e) {
         setError(
@@ -160,6 +190,65 @@ export function useSettings() {
     },
     [apiUrl, registerPushToken],
   );
+
+  /**
+   * POST /api/notifications/test — sends a test push to the registered device.
+   * Only works in release builds where a push token has been registered.
+   */
+  const sendTestNotification = useCallback(async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    if (!apiUrl) return { ok: false, message: "API URL not configured" };
+    if (IS_DEV)
+      return { ok: false, message: "Notifications disabled in dev mode" };
+
+    setTokenSaving(true);
+    try {
+      const res = await axios.post(
+        `${apiUrl}/api/notifications/test`,
+        {},
+        { timeout: 10000 },
+      );
+      return { ok: true, message: res.data?.message ?? "Sent!" };
+    } catch (e: unknown) {
+      const msg =
+        axios.isAxiosError(e) && e.response?.data?.error
+          ? e.response.data.error
+          : "Failed to send test notification";
+      return { ok: false, message: msg };
+    } finally {
+      setTokenSaving(false);
+    }
+  }, [apiUrl]);
+
+  /**
+   * POST /api/scraper/run — dispara uma raspagem imediata no servidor.
+   */
+  const triggerScrape = useCallback(async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    if (!apiUrl) return { ok: false, message: "API URL not configured" };
+    setScraping(true);
+    try {
+      const res = await axios.post(
+        `${apiUrl}/api/scraper/run`,
+        {},
+        { timeout: 8000 },
+      );
+      return {
+        ok: true,
+        message: res.data?.alreadyRunning
+          ? "Scraper already running…"
+          : "Scrape started! Jobs will appear in a few minutes.",
+      };
+    } catch {
+      return { ok: false, message: "Failed to trigger scrape" };
+    } finally {
+      setScraping(false);
+    }
+  }, [apiUrl]);
 
   return {
     // connection
@@ -176,5 +265,10 @@ export function useSettings() {
     fetchSettings,
     saveSettings,
     registerPushToken,
+    scraping,
+    triggerScrape,
+    tokenRegistered,
+    tokenSaving,
+    sendTestNotification,
   };
 }

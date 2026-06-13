@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useApiUrl } from "../hooks/use-api-url";
 import {
   View,
   Text,
@@ -25,7 +26,8 @@ import {
   Circle,
   SendHorizonal,
 } from "lucide-react-native";
-
+import { useRouter } from "expo-router";
+import { Settings as SettingsIcon } from "lucide-react-native";
 // ─── Theme tokens (Vercel / Next.js dark) ────────────────────────────────────
 const T = {
   bg: "#000000",
@@ -64,12 +66,6 @@ interface Job {
   isEasyApply: boolean;
   postedAt?: string;
 }
-
-// ⚠️ SEU IP REAL AQUI!
-const API_URL =
-  Platform.OS === "web"
-    ? "http://localhost:5056/api/jobs"
-    : "http://192.168.18.9:5056/api/jobs";
 
 function sortNewestFirst(jobs: Job[]): Job[] {
   return [...jobs].sort((a, b) => {
@@ -514,12 +510,14 @@ function EmptyState({ onRefresh }: { onRefresh: () => void }) {
 
 // ─── Root screen ─────────────────────────────────────────────────────────────
 export default function Home() {
+  const { apiUrl } = useApiUrl();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [appliedIds, setAppliedIds] = useState<Set<number>>(new Set());
+  const router = useRouter();
 
   const toggleApplied = useCallback((id: number) => {
     setAppliedIds((prev) => {
@@ -530,26 +528,30 @@ export default function Home() {
     });
   }, []);
 
+  const fetchJobs = useCallback(
+    async (isRefresh = false) => {
+      if (!apiUrl) return;
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
+      setError(false);
+      try {
+        const res = await axios.get(`${apiUrl}/api/jobs`, { timeout: 10000 });
+        setJobs(sortNewestFirst(res.data));
+        setLastUpdated(new Date());
+      } catch (err) {
+        console.error("Failed to fetch jobs:", err);
+        setError(true);
+      } finally {
+        setRefreshing(false);
+        setLoading(false);
+      }
+    },
+    [apiUrl],
+  );
+
   useEffect(() => {
     fetchJobs();
-  }, []);
-
-  const fetchJobs = useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
-    setError(false);
-    try {
-      const res = await axios.get(API_URL, { timeout: 10000 });
-      setJobs(sortNewestFirst(res.data));
-      setLastUpdated(new Date());
-    } catch (err) {
-      console.error("Failed to fetch jobs:", err);
-      setError(true);
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, []);
+  }, [fetchJobs]);
 
   const onRefresh = useCallback(() => fetchJobs(true), [fetchJobs]);
 
@@ -674,10 +676,8 @@ export default function Home() {
                 {loading ? "—" : error ? "Offline" : `${jobs.length} open`}
               </Text>
             </View>
-
             <TouchableOpacity
-              onPress={() => fetchJobs(true)}
-              disabled={refreshing || loading}
+              onPress={() => router.push("/settings")}
               style={{
                 width: 34,
                 height: 34,
@@ -689,10 +689,7 @@ export default function Home() {
                 justifyContent: "center",
               }}
             >
-              <RefreshCw
-                size={14}
-                color={refreshing ? T.textMuted : T.textSecondary}
-              />
+              <SettingsIcon size={14} color={T.textSecondary} />
             </TouchableOpacity>
           </View>
         </View>

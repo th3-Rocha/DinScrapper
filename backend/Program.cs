@@ -17,6 +17,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddHostedService<LinkedInScraperService>();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<ScraperTriggerService>();
 
 builder.Services.AddCors(options =>
 {
@@ -68,6 +70,10 @@ app.MapPost("/api/settings", async (AppDbContext db, SearchSettings newSettings)
         settings.Keywords = newSettings.Keywords;
         settings.Location = newSettings.Location;
         settings.WorkplaceType = newSettings.WorkplaceType;
+        if (newSettings.ScrapeIntervalMinutes > 0)
+        {
+            settings.ScrapeIntervalMinutes = newSettings.ScrapeIntervalMinutes;
+        }
         if (!string.IsNullOrEmpty(newSettings.ExpoPushToken))
         {
             settings.ExpoPushToken = newSettings.ExpoPushToken;
@@ -129,5 +135,69 @@ app.MapGet("/api/qrcode", () =>
 
     return Results.File(qrCodeImageGlobal, "image/png");
 });
+
+app.MapPost("/api/notifications/test", async (AppDbContext db, IHttpClientFactory httpClientFactory) =>
+{
+    var settings = await db.SearchSettings.FirstOrDefaultAsync();
+
+    if (settings == null || string.IsNullOrEmpty(settings.ExpoPushToken))
+        return Results.BadRequest(new { error = "Nenhum push token registrado. Abra o app e salve os settings primeiro." });
+
+    if (!settings.ExpoPushToken.StartsWith("ExponentPushToken"))
+        return Results.BadRequest(new { error = "Push token inválido no banco." });
+
+    var pushMessage = new
+    {
+        to = settings.ExpoPushToken,
+        title = "🔔 Teste de Notificação",
+        body = "JobNator conectado com sucesso! As notificações estão funcionando.",
+        data = new { test = true }
+    };
+
+    try
+    {
+        var httpClient = httpClientFactory.CreateClient();
+        var response = await httpClient.PostAsJsonAsync("https://exp.host/--/api/v2/push/send", pushMessage);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (response.IsSuccessStatusCode)
+        {
+            return Results.Ok(new
+            {
+                message = "Notificação de teste enviada com sucesso!",
+                tokenPreview = settings.ExpoPushToken[..Math.Min(30, settings.ExpoPushToken.Length)] + "...",
+                expoResponse = responseBody
+            });
+        }
+
+        return Results.Problem($"Expo API retornou erro: {responseBody}");
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Falha ao enviar notificação: {ex.Message}");
+    }
+});
+
+app.MapPost("/api/scraper/run", async (ScraperTriggerService trigger) =>
+{
+    if (trigger.IsScraping)
+    {
+        return Results.Ok(new
+        {
+            message = "Scraper already running. Check server logs for progress.",
+            alreadyRunning = true
+        });
+    }
+
+    await trigger.TriggerAsync();
+    return Results.Ok(new
+    {
+        message = "Scrape triggered! Jobs will appear in a few minutes.",
+        alreadyRunning = false
+    });
+});
+
+app.MapGet("/api/scraper/status", (ScraperTriggerService trigger) =>
+    Results.Ok(new { isScraping = trigger.IsScraping }));
 
 app.Run();
