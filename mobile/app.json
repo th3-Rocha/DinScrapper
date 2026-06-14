@@ -32,14 +32,14 @@
         "expo-notifications",
         {
           "icon": "./assets/images/icon.png",
-          "color": "#208AEF",
+          "color": "#000000",
           "defaultChannel": "default"
         }
       ],
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#000000",
           "android": {
             "image": "./assets/images/splash-icon.png",
             "imageWidth": 76
@@ -52,7 +52,10 @@
       "reactCompiler": true
     },
     "extra": {
-      "router": {}
+      "router": {},
+      "eas": {
+        "projectId": "040597e5-33ff-401c-ba08-3cb6ab7870f1"
+      }
     }
   }
 }
