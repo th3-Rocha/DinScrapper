@@ -20,5 +20,5 @@ You can easily set up a free PostgreSQL database on [Neon](https://neon.tech/).
 2. Run the application by injecting your database connection string as an environment variable
   ```bash
     DATABASE_URL="Host=ep-...;Database=Jobnator;Username=...;Password=your_password;SSL Mode=VerifyFull;" dotnet run
-    ```
+  ```
 3. Install the APK on your Android device, open the app, and point it to your API URL (you can quickly do this by scanning the ASCII QR Code generated in your backend terminal).
