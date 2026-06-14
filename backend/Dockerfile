@@ -1,17 +1,24 @@
-# 1. Fase de Build (Acompanhando o seu ambiente com .NET 10)
+
+# ── Stage 1: Build ───────────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+
 WORKDIR /src
 COPY . .
 RUN dotnet restore
 RUN dotnet publish -c Release -o /app/publish -r linux-x64 --self-contained true
 
-# 2. Fase de Execução (Imagem do Playwright mais recente)
+# ── Stage 2: Runtime (Playwright image) ──────────────────────────────────────
 FROM mcr.microsoft.com/playwright/dotnet:v1.60.0-noble AS final
+
 WORKDIR /app
 COPY --from=build /app/publish .
 
-# Define que o app deve rodar no ambiente de Produção
+# Set ASP.NET Core environment
 ENV ASPNETCORE_ENVIRONMENT=Production
 
-# O comando que liga o servidor
+# Connection string is injected at runtime via DATABASE_URL environment variable.
+# Set it when running the container
+# Example:
+#   docker run -e DATABASE_URL="Host=...;Database=...;Username=...;Password=...;SSL Mode=VerifyFull;Channel Binding=Require;" ...
+
 ENTRYPOINT ["dotnet", "backend.dll"]

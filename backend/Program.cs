@@ -14,7 +14,17 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+{
+    var connectionString =
+        Environment.GetEnvironmentVariable("DATABASE_URL")
+        ?? builder.Configuration.GetConnectionString("DefaultConnection")
+        ?? throw new InvalidOperationException(
+            "No database connection string found. " +
+            "Set the DATABASE_URL environment variable or add DefaultConnection to appsettings.json.");
+
+    options.UseNpgsql(connectionString);
+});
+
 
 builder.Services.AddHostedService<LinkedInScraperService>();
 builder.Services.AddHttpClient();
@@ -33,8 +43,11 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors("AllowAll");
+
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5056";
 app.Urls.Add($"http://0.0.0.0:{port}");
+
+// ── GET /api/jobs ────────────────────────────────────────────────────────────
 app.MapGet("/api/jobs", async (AppDbContext db) =>
 {
     var jobs = await db.Jobs
@@ -44,7 +57,14 @@ app.MapGet("/api/jobs", async (AppDbContext db) =>
     return Results.Ok(jobs);
 });
 
+// ── DELETE /api/jobs ─────────────────────────────────────────────────────────
+app.MapDelete("/api/jobs", async (AppDbContext db) =>
+{
+    var deletedCount = await db.Jobs.ExecuteDeleteAsync();
+    return Results.Ok(new { message = "All jobs deleted successfully.", count = deletedCount });
+});
 
+// ── GET /api/settings ────────────────────────────────────────────────────────
 app.MapGet("/api/settings", async (AppDbContext db) =>
 {
     var settings = await db.SearchSettings.FirstOrDefaultAsync();
@@ -57,6 +77,7 @@ app.MapGet("/api/settings", async (AppDbContext db) =>
     return Results.Ok(settings);
 });
 
+// ── POST /api/settings ───────────────────────────────────────────────────────
 app.MapPost("/api/settings", async (AppDbContext db, SearchSettings newSettings) =>
 {
     var settings = await db.SearchSettings.FirstOrDefaultAsync();
@@ -71,23 +92,20 @@ app.MapPost("/api/settings", async (AppDbContext db, SearchSettings newSettings)
         settings.Location = newSettings.Location;
         settings.WorkplaceType = newSettings.WorkplaceType;
         if (newSettings.ScrapeIntervalMinutes > 0)
-        {
             settings.ScrapeIntervalMinutes = newSettings.ScrapeIntervalMinutes;
-        }
         if (!string.IsNullOrEmpty(newSettings.ExpoPushToken))
-        {
             settings.ExpoPushToken = newSettings.ExpoPushToken;
-        }
     }
 
     await db.SaveChangesAsync();
     return Results.Ok(settings);
 });
 
+// ── POST /api/settings/push-token ────────────────────────────────────────────
 app.MapPost("/api/settings/push-token", async (AppDbContext db, PushTokenRequest req) =>
 {
     if (string.IsNullOrEmpty(req.ExpoPushToken) || !req.ExpoPushToken.StartsWith("ExponentPushToken"))
-        return Results.BadRequest(new { error = "Token inválido ou ausente." });
+        return Results.BadRequest(new { error = "Invalid or missing push token." });
 
     var settings = await db.SearchSettings.FirstOrDefaultAsync();
     if (settings == null)
@@ -101,9 +119,14 @@ app.MapPost("/api/settings/push-token", async (AppDbContext db, PushTokenRequest
     }
 
     await db.SaveChangesAsync();
-    return Results.Ok(new { message = "Push token atualizado.", tokenPreview = req.ExpoPushToken[..Math.Min(30, req.ExpoPushToken.Length)] + "..." });
+    return Results.Ok(new
+    {
+        message = "Push token updated successfully.",
+        tokenPreview = req.ExpoPushToken[..Math.Min(30, req.ExpoPushToken.Length)] + "..."
+    });
 });
 
+// ── QR Code generation ───────────────────────────────────────────────────────
 string qrCodeAsciiGlobal = "";
 byte[] qrCodeImageGlobal = Array.Empty<byte>();
 
@@ -123,10 +146,7 @@ if (string.IsNullOrEmpty(backendUrlGlobal))
     }
 
     if (!string.IsNullOrEmpty(localIp))
-    {
-
         backendUrlGlobal = $"http://{localIp}:5056";
-    }
 }
 
 if (!string.IsNullOrEmpty(backendUrlGlobal))
@@ -141,36 +161,38 @@ if (!string.IsNullOrEmpty(backendUrlGlobal))
     qrCodeImageGlobal = pngQrCode.GetGraphic(20);
 
     Console.WriteLine("\n==================================================");
-    Console.WriteLine($"🔗 URL de Conexão Ativa: {backendUrlGlobal}");
-    Console.WriteLine($"🌐 Acesse no navegador: {backendUrlGlobal}/api/qrcode");
+    Console.WriteLine($"🔗 Active Connection URL: {backendUrlGlobal}");
+    Console.WriteLine($"🌐 Open in browser: {backendUrlGlobal}/api/qrcode");
     Console.WriteLine("==================================================\n");
     Console.WriteLine(qrCodeAsciiGlobal);
     Console.WriteLine("==================================================\n");
 }
 
+// ── GET /api/qrcode ──────────────────────────────────────────────────────────
 app.MapGet("/api/qrcode", () =>
 {
     if (qrCodeImageGlobal.Length == 0)
-        return Results.Problem("Não foi possível gerar o QR Code (URL não definida).");
+        return Results.Problem("Could not generate QR Code (URL not defined).");
 
     return Results.File(qrCodeImageGlobal, "image/png");
 });
 
+// ── POST /api/notifications/test ─────────────────────────────────────────────
 app.MapPost("/api/notifications/test", async (AppDbContext db, IHttpClientFactory httpClientFactory) =>
 {
     var settings = await db.SearchSettings.FirstOrDefaultAsync();
 
     if (settings == null || string.IsNullOrEmpty(settings.ExpoPushToken))
-        return Results.BadRequest(new { error = "Nenhum push token registrado. Abra o app e salve os settings primeiro." });
+        return Results.BadRequest(new { error = "No push token registered. Open the app and save settings first." });
 
     if (!settings.ExpoPushToken.StartsWith("ExponentPushToken"))
-        return Results.BadRequest(new { error = "Push token inválido no banco." });
+        return Results.BadRequest(new { error = "Invalid push token in database." });
 
     var pushMessage = new
     {
         to = settings.ExpoPushToken,
-        title = "🔔 Teste de Notificação",
-        body = "JobNator conectado com sucesso! As notificações estão funcionando.",
+        title = "🔔 Test Notification",
+        body = "JobNator connected successfully! Push notifications are working.",
         data = new { test = true }
     };
 
@@ -184,20 +206,21 @@ app.MapPost("/api/notifications/test", async (AppDbContext db, IHttpClientFactor
         {
             return Results.Ok(new
             {
-                message = "Notificação de teste enviada com sucesso!",
+                message = "Test notification sent successfully!",
                 tokenPreview = settings.ExpoPushToken[..Math.Min(30, settings.ExpoPushToken.Length)] + "...",
                 expoResponse = responseBody
             });
         }
 
-        return Results.Problem($"Expo API retornou erro: {responseBody}");
+        return Results.Problem($"Expo API returned an error: {responseBody}");
     }
     catch (Exception ex)
     {
-        return Results.Problem($"Falha ao enviar notificação: {ex.Message}");
+        return Results.Problem($"Failed to send notification: {ex.Message}");
     }
 });
 
+// ── POST /api/scraper/run ────────────────────────────────────────────────────
 app.MapPost("/api/scraper/run", async (ScraperTriggerService trigger) =>
 {
     if (trigger.IsScraping)
@@ -217,6 +240,7 @@ app.MapPost("/api/scraper/run", async (ScraperTriggerService trigger) =>
     });
 });
 
+// ── GET /api/scraper/status ──────────────────────────────────────────────────
 app.MapGet("/api/scraper/status", (ScraperTriggerService trigger) =>
     Results.Ok(new
     {

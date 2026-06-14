@@ -14,6 +14,10 @@ public class LinkedInScraperService : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ScraperTriggerService _triggerService;
 
+    // ── Browser reuse across scrape cycles ──────────────────────────────────
+    private IPlaywright? _playwright;
+    private IBrowser? _browser;
+
     public LinkedInScraperService(
         IServiceProvider serviceProvider,
         ILogger<LinkedInScraperService> logger,
@@ -24,6 +28,48 @@ public class LinkedInScraperService : BackgroundService
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _triggerService = triggerService;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Browser singleton — reused across cycles to avoid re-launch overhead
+    // ─────────────────────────────────────────────────────────────────────────
+    private async Task<IBrowser> GetBrowserAsync()
+    {
+        if (_browser is { IsConnected: true })
+            return _browser;
+
+        // Dispose stale instances if browser disconnected
+        if (_browser != null)
+        {
+            try { await _browser.DisposeAsync(); } catch { /* ignore */ }
+            _browser = null;
+        }
+        if (_playwright != null)
+        {
+            try { _playwright.Dispose(); } catch { /* ignore */ }
+            _playwright = null;
+        }
+
+        _playwright = await Playwright.CreateAsync();
+        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = true,
+            Args = new[]
+            {
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",                   // fewer OS processes = less RAM
+                "--disable-extensions",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-images",                          // images not needed for scraping
+                "--blink-settings=imagesEnabled=false",
+                "--js-flags=--max-old-space-size=128",       // cap V8 heap
+                "--window-size=1280,800",
+            }
+        });
+
+        _logger.LogInformation("🌐 Browser Chromium iniciado.");
+        return _browser;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -79,6 +125,23 @@ public class LinkedInScraperService : BackgroundService
                 catch (OperationCanceledException) { break; }
             }
         }
+
+        // Cleanup browser on shutdown
+        await DisposeBrowserAsync();
+    }
+
+    private async Task DisposeBrowserAsync()
+    {
+        if (_browser != null)
+        {
+            try { await _browser.DisposeAsync(); } catch { /* ignore */ }
+            _browser = null;
+        }
+        if (_playwright != null)
+        {
+            try { _playwright.Dispose(); } catch { /* ignore */ }
+            _playwright = null;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -88,6 +151,11 @@ public class LinkedInScraperService : BackgroundService
     {
         var sw = Stopwatch.StartNew();
         var result = new ScrapeResult { RunAt = DateTime.UtcNow };
+        int deletedCount = 0;
+
+        // Context/page declared outside try so we can close them in finally
+        IBrowserContext? context = null;
+        IPage? page = null;
 
         try
         {
@@ -95,7 +163,7 @@ public class LinkedInScraperService : BackgroundService
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
             // ── Limpeza de vagas antigas ─────────────────────────────────────
-            var deletedCount = await db.Jobs
+            deletedCount = await db.Jobs
                 .Where(j => j.DateScraped < DateTime.UtcNow.AddDays(-1))
                 .ExecuteDeleteAsync();
             result.JobsDeleted = deletedCount;
@@ -114,23 +182,10 @@ public class LinkedInScraperService : BackgroundService
 
             string searchUrl = $"https://www.linkedin.com/jobs/search?keywords={keyword}&location={location}&f_TPR=r86400&f_WT={wType}";
 
-            // ── Playwright ───────────────────────────────────────────────────
-            using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-            {
-                Headless = true,
-                Args = new[]
-                {
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1280,800",
-                }
-            });
+            // ── Playwright — reuse browser, create fresh context per cycle ───
+            var browser = await GetBrowserAsync();
 
-            // Contexto com user-agent real para reduzir detecção de bot
-            await using var context = await browser.NewContextAsync(new BrowserNewContextOptions
+            context = await browser.NewContextAsync(new BrowserNewContextOptions
             {
                 UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                 ViewportSize = new ViewportSize { Width = 1280, Height = 800 },
@@ -141,8 +196,14 @@ public class LinkedInScraperService : BackgroundService
                 }
             });
 
-            var page = await context.NewPageAsync();
-            var detailPage = await context.NewPageAsync();
+            // ── Single page only (was two pages before — saves ~80MB) ────────
+            page = await context.NewPageAsync();
+
+            // Block images/media at the network level for extra memory savings
+            await page.RouteAsync("**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf}", async route =>
+            {
+                await route.AbortAsync();
+            });
 
             // ── Navega para a listagem ───────────────────────────────────────
             _logger.LogInformation("🌐 Abrindo LinkedIn Jobs...");
@@ -187,7 +248,7 @@ public class LinkedInScraperService : BackgroundService
                 return;
             }
 
-            // ── Conta os cards ───────────────────────────────────────────────
+            // ── Coleta todos os links primeiro (evita manter IElementHandles vivos) ──
             var jobCards = await page.QuerySelectorAllAsync("a.base-card__full-link");
             result.JobsFound = jobCards.Count;
             _logger.LogInformation("🔍 {Count} cards de vagas encontrados na listagem.", jobCards.Count);
@@ -202,19 +263,32 @@ public class LinkedInScraperService : BackgroundService
                 return;
             }
 
-            // ── Processa cada card ───────────────────────────────────────────
+            // Collect all links upfront, then release the element handles
+            var links = new List<(string link, long linkedId)>();
+            foreach (var card in jobCards)
+            {
+                string href = await card.GetAttributeAsync("href") ?? "";
+                href = href.Split('?')[0];
+                var idMatch = Regex.Match(href, @"\d{8,10}");
+                long linkedId = idMatch.Success ? long.Parse(idMatch.Value) : 0;
+                if (linkedId != 0)
+                    links.Add((href, linkedId));
+            }
+            // Release element handles — frees JS heap on the page
+            jobCards = null!;
+
+            // ── Processa cada link usando a mesma page (sem detailPage separada) ─
             int novas = 0;
             int filtradas = 0;
             int skip = 0;
 
-            foreach (var card in jobCards)
-            {
-                string link = await card.GetAttributeAsync("href") ?? "";
-                link = link.Split('?')[0];
-                var idMatch = Regex.Match(link, @"\d{8,10}");
-                long linkedId = idMatch.Success ? long.Parse(idMatch.Value) : 0;
+            // Collect new jobs in memory, save all at once at the end
+            var novasVagas = new List<JobListing>();
 
-                if (linkedId == 0 || db.Jobs.Any(j => j.LinkedInId == linkedId || j.Link == link))
+            foreach (var (link, linkedId) in links)
+            {
+                // Check DB before loading page
+                if (db.Jobs.Any(j => j.LinkedInId == linkedId || j.Link == link))
                 {
                     skip++;
                     continue;
@@ -222,7 +296,7 @@ public class LinkedInScraperService : BackgroundService
 
                 try
                 {
-                    await detailPage.GotoAsync(link, new PageGotoOptions
+                    await page.GotoAsync(link, new PageGotoOptions
                     {
                         WaitUntil = WaitUntilState.DOMContentLoaded,
                         Timeout = 20_000
@@ -237,19 +311,19 @@ public class LinkedInScraperService : BackgroundService
 
                 await Task.Delay(1000);
 
-                var titleEl = await detailPage.QuerySelectorAsync(".top-card-layout__title");
-                var companyEl = await detailPage.QuerySelectorAsync(".topcard__org-name-link");
-                var locationEl = await detailPage.QuerySelectorAsync(".topcard__flavor--bullet");
-                var timeEl = await detailPage.QuerySelectorAsync(".posted-time-ago__text");
-                var applicantsEl = await detailPage.QuerySelectorAsync(".num-applicants__caption");
-                var descEl = await detailPage.QuerySelectorAsync(".description__text");
-                var topCardEl = await detailPage.QuerySelectorAsync(".top-card-layout");
+                var titleEl = await page.QuerySelectorAsync(".top-card-layout__title");
+                var companyEl = await page.QuerySelectorAsync(".topcard__org-name-link");
+                var locationEl = await page.QuerySelectorAsync(".topcard__flavor--bullet");
+                var timeEl = await page.QuerySelectorAsync(".posted-time-ago__text");
+                var applicantsEl = await page.QuerySelectorAsync(".num-applicants__caption");
+                var descEl = await page.QuerySelectorAsync(".description__text");
+                var topCardEl = await page.QuerySelectorAsync(".top-card-layout");
                 string topText = topCardEl != null ? await topCardEl.InnerTextAsync() : "";
 
                 bool easyApply = topText.Contains("Candidatura simplificada", StringComparison.OrdinalIgnoreCase) ||
                                  topText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
 
-                var criteria = await detailPage.QuerySelectorAllAsync(".description__job-criteria-item");
+                var criteria = await page.QuerySelectorAllAsync(".description__job-criteria-item");
                 string empType = "";
                 if (criteria.Count >= 2)
                 {
@@ -260,15 +334,31 @@ public class LinkedInScraperService : BackgroundService
                 string titulo = titleEl != null ? (await titleEl.InnerTextAsync()).Trim() : "";
                 string desc = descEl != null ? (await descEl.InnerTextAsync()).Trim() : "";
 
+                // Pega a string de candidatos em texto limpo
+                string applicantsCount = applicantsEl != null ? (await applicantsEl.InnerTextAsync()).Trim() : "";
+
                 var tituloLow = titulo.ToLowerInvariant();
-                bool ruim = tituloLow.Contains("suporte") || tituloLow.Contains("help desk") ||
-                            tituloLow.Contains("vendas") || tituloLow.Contains("atendimento") ||
-                            tituloLow.Contains("professor") || tituloLow.Contains("tutor") ||
+                bool ruim = tituloLow.Contains("suporte") ||
+                            tituloLow.Contains("help desk") ||
+                            tituloLow.Contains("vendas") ||
+                            tituloLow.Contains("atendimento") ||
+                            tituloLow.Contains("professor") ||
+                            tituloLow.Contains("tutor") ||
                             tituloLow.Contains("analista de suporte");
 
                 if (ruim)
                 {
                     _logger.LogInformation("🗑️  Filtrada: \"{Title}\"", titulo);
+                    filtradas++;
+                    continue;
+                }
+
+                // ========================================================
+                // NOVO FILTRO: Descarta se tiver mais de 200 candidatos
+                // ========================================================
+                if (applicantsCount.Contains("Over 200 applicants", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("🗑️  Filtrada (Concorrência muito alta): \"{Title}\" [{Applicants}]", titulo, applicantsCount);
                     filtradas++;
                     continue;
                 }
@@ -285,22 +375,28 @@ public class LinkedInScraperService : BackgroundService
                     EmploymentType = empType,
                     IsEasyApply = easyApply,
                     TimePosted = timeEl != null ? (await timeEl.InnerTextAsync()).Trim() : "",
-                    ApplicantCount = applicantsEl != null ? (await applicantsEl.InnerTextAsync()).Trim() : "",
+                    ApplicantCount = applicantsCount, // Reaproveitamos a variável limpa
                     Description = desc,
                     Link = link
                 };
 
-                db.Jobs.Add(novaVaga);
-                await db.SaveChangesAsync();
+                novasVagas.Add(novaVaga);
                 novas++;
                 _logger.LogInformation("✅ Nova: \"{Title}\" @ {Company}", novaVaga.Title, novaVaga.Company);
 
-                await SendPushNotificationAsync(token, novaVaga);
                 await Task.Delay(1500);
             }
 
-            await detailPage.CloseAsync();
-            await page.CloseAsync();
+            // ── Single batch SaveChanges instead of one per job ──────────────
+            if (novasVagas.Count > 0)
+            {
+                db.Jobs.AddRange(novasVagas);
+                await db.SaveChangesAsync();
+
+                // Send push notifications after saving
+                foreach (var vaga in novasVagas)
+                    await SendPushNotificationAsync(token, vaga);
+            }
 
             result.Status = "ok";
             result.Success = true;
@@ -323,6 +419,16 @@ public class LinkedInScraperService : BackgroundService
         }
         finally
         {
+            // Always close page and context — browser stays alive for reuse
+            if (page != null)
+            {
+                try { await page.CloseAsync(); } catch { /* ignore */ }
+            }
+            if (context != null)
+            {
+                try { await context.DisposeAsync(); } catch { /* ignore */ }
+            }
+
             sw.Stop();
             result.DurationSeconds = sw.Elapsed.TotalSeconds;
             _triggerService.SetLastResult(result);
@@ -344,7 +450,7 @@ public class LinkedInScraperService : BackgroundService
         var pushMessage = new
         {
             to = expoPushToken,
-            title = "🚨 Nova Vaga: " + vaga.Title,
+            title = "New Job: " + vaga.Title,
             body = $"{vaga.Company} · {vaga.WorkplaceType}\n{vaga.ApplicantCount}",
             data = new { urlVaga = vaga.Link }
         };

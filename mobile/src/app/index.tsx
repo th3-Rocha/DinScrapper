@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useApiUrl } from "../hooks/use-api-url";
 import {
   View,
@@ -25,10 +25,13 @@ import {
   CheckCircle2,
   Circle,
   SendHorizonal,
+  Settings as SettingsIcon,
+  Trash2,
+  ListFilter,
 } from "lucide-react-native";
 import { useRouter } from "expo-router";
-import { Settings as SettingsIcon } from "lucide-react-native";
-// ─── Theme tokens (Vercel / Next.js dark) ────────────────────────────────────
+
+// ─── Theme tokens ────────────────────────────────────────────────────────────
 const T = {
   bg: "#000000",
   surface: "#0a0a0a",
@@ -67,13 +70,40 @@ interface Job {
   postedAt?: string;
 }
 
-function sortNewestFirst(jobs: Job[]): Job[] {
-  return [...jobs].sort((a, b) => {
-    if (a.postedAt && b.postedAt) {
-      return new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime();
-    }
-    return b.id - a.id;
-  });
+type FilterMode = "RECENT_SCRAPED" | "FEWEST_APPLICANTS" | "RECENT_POSTED";
+
+// ─── Sorting Helpers ─────────────────────────────────────────────────────────
+function parseApplicantCount(countStr: string): number {
+  if (!countStr) return 9999;
+  const lower = countStr.toLowerCase();
+
+  if (lower.includes("first 25")) return 10;
+  if (lower.includes("over 200")) return 201;
+
+  // Extract number if present "45 applicants" -> 45
+  const match = lower.match(/(\d+)/);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+
+  if (lower.includes("25-199")) return 100;
+  return 9999;
+}
+
+function parseTimePosted(timeStr: string): number {
+  if (!timeStr) return 999999;
+  const lower = timeStr.toLowerCase();
+  const match = lower.match(/(\d+)/);
+  const val = match ? parseInt(match[1], 10) : 1;
+
+  if (lower.includes("second")) return val / 60;
+  if (lower.includes("minute")) return val;
+  if (lower.includes("hour")) return val * 60;
+  if (lower.includes("day")) return val * 60 * 24;
+  if (lower.includes("week")) return val * 60 * 24 * 7;
+  if (lower.includes("month")) return val * 60 * 24 * 30;
+
+  return 999999; // fallback
 }
 
 // ─── Animated Checkbox ───────────────────────────────────────────────────────
@@ -179,13 +209,13 @@ function JobCard({
       Animated.timing(fadeAnim, {
         toValue: 1,
         duration: 320,
-        delay: index * 55,
+        delay: Math.min(index * 55, 500), // Cap animation delay
         useNativeDriver: true,
       }),
       Animated.timing(slideAnim, {
         toValue: 0,
         duration: 320,
-        delay: index * 55,
+        delay: Math.min(index * 55, 500),
         useNativeDriver: true,
       }),
     ]).start();
@@ -517,6 +547,7 @@ export default function Home() {
   const [error, setError] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [appliedIds, setAppliedIds] = useState<Set<number>>(new Set());
+  const [filterMode, setFilterMode] = useState<FilterMode>("RECENT_SCRAPED");
   const router = useRouter();
 
   const toggleApplied = useCallback((id: number) => {
@@ -536,7 +567,7 @@ export default function Home() {
       setError(false);
       try {
         const res = await axios.get(`${apiUrl}/api/jobs`, { timeout: 10000 });
-        setJobs(sortNewestFirst(res.data));
+        setJobs(res.data); // Keep raw data, will sort in useMemo
         setLastUpdated(new Date());
       } catch (err) {
         console.error("Failed to fetch jobs:", err);
@@ -555,6 +586,61 @@ export default function Home() {
 
   const onRefresh = useCallback(() => fetchJobs(true), [fetchJobs]);
 
+  const handleDeleteAllJobs = useCallback(() => {
+    Alert.alert(
+      "Delete All Jobs",
+      "Are you sure you want to permanently delete all jobs from your database?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await axios.delete(`${apiUrl}/api/jobs`);
+              setJobs([]);
+              Alert.alert("Success", "All jobs have been deleted.");
+            } catch (err) {
+              Alert.alert("Error", "Could not delete jobs from the server.");
+            }
+          },
+        },
+      ],
+    );
+  }, [apiUrl]);
+
+  const cycleFilter = () => {
+    setFilterMode((prev) => {
+      if (prev === "RECENT_SCRAPED") return "FEWEST_APPLICANTS";
+      if (prev === "FEWEST_APPLICANTS") return "RECENT_POSTED";
+      return "RECENT_SCRAPED";
+    });
+  };
+
+  const processedJobs = useMemo(() => {
+    let sorted = [...jobs];
+
+    if (filterMode === "RECENT_SCRAPED") {
+      sorted.sort((a, b) => b.id - a.id);
+    } else if (filterMode === "FEWEST_APPLICANTS") {
+      sorted.sort((a, b) => {
+        const rankA = parseApplicantCount(a.applicantCount);
+        const rankB = parseApplicantCount(b.applicantCount);
+        if (rankA === rankB) return b.id - a.id;
+        return rankA - rankB;
+      });
+    } else if (filterMode === "RECENT_POSTED") {
+      sorted.sort((a, b) => {
+        const timeA = parseTimePosted(a.timePosted);
+        const timeB = parseTimePosted(b.timePosted);
+        if (timeA === timeB) return b.id - a.id;
+        return timeA - timeB;
+      });
+    }
+
+    return sorted;
+  }, [jobs, filterMode]);
+
   const formatLastUpdated = () => {
     if (!lastUpdated) return "";
     const mins = Math.floor((Date.now() - lastUpdated.getTime()) / 60000);
@@ -564,6 +650,21 @@ export default function Home() {
   };
 
   const appliedCount = appliedIds.size;
+
+  const renderFilterIcon = () => {
+    if (filterMode === "RECENT_SCRAPED")
+      return <ListFilter size={14} color={T.textSecondary} />;
+    if (filterMode === "FEWEST_APPLICANTS")
+      return <Users size={14} color={T.textSecondary} />;
+    if (filterMode === "RECENT_POSTED")
+      return <Clock size={14} color={T.textSecondary} />;
+  };
+
+  const filterLabels = {
+    RECENT_SCRAPED: "Scraped",
+    FEWEST_APPLICANTS: "Applicants",
+    RECENT_POSTED: "Recent",
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
@@ -608,34 +709,7 @@ export default function Home() {
             )}
           </View>
 
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            {appliedCount > 0 && (
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  backgroundColor: "rgba(34,197,94,0.08)",
-                  paddingHorizontal: 10,
-                  paddingVertical: 5,
-                  borderRadius: 100,
-                  borderWidth: 1,
-                  borderColor: "rgba(34,197,94,0.2)",
-                }}
-              >
-                <CheckCircle2 size={11} color={T.success} />
-                <Text
-                  style={{
-                    color: T.success,
-                    fontWeight: "700",
-                    fontSize: 12,
-                    marginLeft: 5,
-                  }}
-                >
-                  {appliedCount} applied
-                </Text>
-              </View>
-            )}
-
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             <View
               style={{
                 flexDirection: "row",
@@ -676,6 +750,53 @@ export default function Home() {
                 {loading ? "—" : error ? "Offline" : `${jobs.length} open`}
               </Text>
             </View>
+
+            {/* Filter Toggle Button */}
+            <TouchableOpacity
+              onPress={cycleFilter}
+              style={{
+                height: 34,
+                paddingHorizontal: 10,
+                borderRadius: 9,
+                backgroundColor: T.glass,
+                borderWidth: 1,
+                borderColor: T.glassBorder,
+                alignItems: "center",
+                justifyContent: "center",
+                flexDirection: "row",
+                gap: 5,
+              }}
+            >
+              {renderFilterIcon()}
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: "600",
+                  color: T.textSecondary,
+                }}
+              >
+                {filterLabels[filterMode]}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Delete All Button */}
+            <TouchableOpacity
+              onPress={handleDeleteAllJobs}
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 9,
+                backgroundColor: T.glass,
+                borderWidth: 1,
+                borderColor: T.glassBorder,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Trash2 size={14} color={T.danger} />
+            </TouchableOpacity>
+
+            {/* Settings Button */}
             <TouchableOpacity
               onPress={() => router.push("/settings")}
               style={{
@@ -706,7 +827,7 @@ export default function Home() {
         </View>
       ) : (
         <FlatList
-          data={jobs}
+          data={processedJobs}
           keyExtractor={(item) => item.id.toString()}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={{
