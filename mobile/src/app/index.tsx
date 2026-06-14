@@ -67,6 +67,7 @@ interface Job {
   timePosted: string;
   applicantCount: string;
   isEasyApply: boolean;
+  description: string;
   postedAt?: string;
 }
 
@@ -233,6 +234,11 @@ function JobCard({
     outputRange: [T.glass, T.appliedBg],
   });
 
+  // Limpa a descrição removendo quebras de linha e múltiplos espaços em branco
+  const cleanDescription = item.description
+    ? item.description.replace(/\s+/g, " ").trim()
+    : "";
+
   return (
     <Animated.View
       style={{
@@ -338,6 +344,22 @@ function JobCard({
                 {item.location}
               </Text>
             </View>
+          ) : null}
+
+          {/* ─── Preview da Descrição ─── */}
+          {cleanDescription ? (
+            <Text
+              style={{
+                fontSize: 13,
+                color: T.textSecondary,
+                marginTop: 12,
+                lineHeight: 18,
+                opacity: applied ? 0.6 : 1,
+              }}
+              numberOfLines={2}
+            >
+              {cleanDescription}
+            </Text>
           ) : null}
 
           <View

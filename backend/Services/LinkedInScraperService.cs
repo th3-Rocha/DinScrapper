@@ -447,11 +447,14 @@ public class LinkedInScraperService : BackgroundService
             return;
         }
 
+        string cleanDesc = Regex.Replace(vaga.Description ?? "", @"\s+", " ").Trim();
+        string shortDesc = cleanDesc.Length > 90 ? cleanDesc.Substring(0, 90) + "..." : cleanDesc;
+
         var pushMessage = new
         {
             to = expoPushToken,
             title = "New Job: " + vaga.Title,
-            body = $"{vaga.Company} · {vaga.WorkplaceType}\n{vaga.ApplicantCount}",
+            body = $"{vaga.Company} · {vaga.WorkplaceType} | {vaga.ApplicantCount}\n{shortDesc}",
             data = new { urlVaga = vaga.Link }
         };
 
