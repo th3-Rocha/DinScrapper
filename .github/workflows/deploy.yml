@@ -14,7 +14,13 @@ jobs:
 
       - name: Login no Container Registry do Heroku
         run: echo ${{ secrets.HEROKU_API_KEY }} | docker login --username=_ --password-stdin registry.heroku.com
-
+      - name: Login no Microsoft Container Registry
+        run: |
+          # A Microsoft permite login anônimo ou via Azure CLI.
+          # Como o problema é a falta de permissão anônima,
+          # vamos forçar um 'pull' manual para pré-autenticar o cache.
+          docker pull mcr.microsoft.com/dotnet/sdk:10.0
+          docker pull mcr.microsoft.com/playwright/dotnet:v1.60.0-noble
       - name: Build e Push para o Heroku
         run: |
           # O ponto no final do comando indica o contexto (a pasta backend)
