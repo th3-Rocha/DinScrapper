@@ -145,6 +145,22 @@ public class LinkedInScraperService : BackgroundService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Helper: Extrai as palavras que queremos forçar a ter no título
+    // ─────────────────────────────────────────────────────────────────────────
+    private List<string> ExtrairPalavrasChave(string keywordQuery)
+    {
+        var terms = new List<string>();
+        // Pega tudo que estiver entre aspas duplas na query do banco
+        var matches = Regex.Matches(keywordQuery, "\"([^\"]+)\"");
+        foreach (Match match in matches)
+        {
+            if (match.Groups.Count > 1)
+                terms.Add(match.Groups[1].Value.ToLowerInvariant());
+        }
+        return terms;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Raspagem principal
     // ─────────────────────────────────────────────────────────────────────────
     private async Task ScrapeJobsAsync()
@@ -153,9 +169,8 @@ public class LinkedInScraperService : BackgroundService
         var result = new ScrapeResult { RunAt = DateTime.UtcNow };
         int deletedCount = 0;
 
-        // Context/page declared outside try so we can close them in finally
         IBrowserContext? context = null;
-        IPage? page = null;
+        IPage? listPage = null; // A página que carrega a listagem
 
         try
         {
@@ -177,8 +192,12 @@ public class LinkedInScraperService : BackgroundService
             string wType = settings.WorkplaceType.ToString();
             string token = settings.ExpoPushToken;
 
-            _logger.LogInformation("🔑 Keywords: {KW} | Location: {Loc} | Workplace: {WT}",
-                settings.Keywords, settings.Location, wType);
+            // Extrai a lógica do Filtro Strict
+            bool isStrictSearch = settings.Keywords.StartsWith("title:(");
+            List<string> requiredTerms = ExtrairPalavrasChave(settings.Keywords);
+
+            _logger.LogInformation("🔑 Keywords: {KW} | Location: {Loc} | Strict Mode: {Strict}",
+                settings.Keywords, settings.Location, isStrictSearch);
 
             string searchUrl = $"https://www.linkedin.com/jobs/search?keywords={keyword}&location={location}&f_TPR=r86400&f_WT={wType}";
 
@@ -196,20 +215,19 @@ public class LinkedInScraperService : BackgroundService
                 }
             });
 
-            // ── Single page only (was two pages before — saves ~80MB) ────────
-            page = await context.NewPageAsync();
+            // ── Carrega a listagem ───────────────────────────────────────
+            listPage = await context.NewPageAsync();
 
-            // Block images/media at the network level for extra memory savings
-            await page.RouteAsync("**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf}", async route =>
+            // Block images/media
+            await listPage.RouteAsync("**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf}", async route =>
             {
                 await route.AbortAsync();
             });
 
-            // ── Navega para a listagem ───────────────────────────────────────
             _logger.LogInformation("🌐 Abrindo LinkedIn Jobs...");
             try
             {
-                await page.GotoAsync(searchUrl, new PageGotoOptions
+                await listPage.GotoAsync(searchUrl, new PageGotoOptions
                 {
                     WaitUntil = WaitUntilState.DOMContentLoaded,
                     Timeout = 30_000
@@ -223,11 +241,9 @@ public class LinkedInScraperService : BackgroundService
                 return;
             }
 
-            // Pequena pausa para JS carregar os cards
             await Task.Delay(2000);
 
-            // ── Detecção de bloqueio ─────────────────────────────────────────
-            var pageTitle = await page.TitleAsync();
+            var pageTitle = await listPage.TitleAsync();
             var pageTitleLow = pageTitle.ToLowerInvariant();
             result.PageTitle = pageTitle;
             _logger.LogInformation("📄 Título da página: \"{Title}\"", pageTitle);
@@ -248,22 +264,20 @@ public class LinkedInScraperService : BackgroundService
                 return;
             }
 
-            // ── Coleta todos os links primeiro (evita manter IElementHandles vivos) ──
-            var jobCards = await page.QuerySelectorAllAsync("a.base-card__full-link");
+            var jobCards = await listPage.QuerySelectorAllAsync("a.base-card__full-link");
             result.JobsFound = jobCards.Count;
             _logger.LogInformation("🔍 {Count} cards de vagas encontrados na listagem.", jobCards.Count);
 
             if (jobCards.Count == 0)
             {
-                var alt1 = (await page.QuerySelectorAllAsync(".job-search-card")).Count;
-                var alt2 = (await page.QuerySelectorAllAsync("[data-entity-urn*='jobPosting']")).Count;
+                var alt1 = (await listPage.QuerySelectorAllAsync(".job-search-card")).Count;
+                var alt2 = (await listPage.QuerySelectorAllAsync("[data-entity-urn*='jobPosting']")).Count;
                 result.Status = "empty";
                 result.ErrorMessage = $"Seletor 'a.base-card__full-link' = 0. Seletores alt: .job-search-card={alt1}, data-entity-urn={alt2}. Título: '{pageTitle}'";
                 _logger.LogWarning("⚠️ Nenhum card encontrado. Diagnóstico → .job-search-card={A1} | data-entity-urn={A2}", alt1, alt2);
                 return;
             }
 
-            // Collect all links upfront, then release the element handles
             var links = new List<(string link, long linkedId)>();
             foreach (var card in jobCards)
             {
@@ -274,126 +288,223 @@ public class LinkedInScraperService : BackgroundService
                 if (linkedId != 0)
                     links.Add((href, linkedId));
             }
-            // Release element handles — frees JS heap on the page
             jobCards = null!;
 
-            // ── Processa cada link usando a mesma page (sem detailPage separada) ─
+            // ⚠️ EXTREMAMENTE IMPORTANTE: Fecha a página de listagem para liberar RAM!
+            await listPage.CloseAsync();
+            listPage = null;
+
             int novas = 0;
             int filtradas = 0;
             int skip = 0;
 
-            // Collect new jobs in memory, save all at once at the end
             var novasVagas = new List<JobListing>();
 
             foreach (var (link, linkedId) in links)
             {
-                // Check DB before loading page
                 if (db.Jobs.Any(j => j.LinkedInId == linkedId || j.Link == link))
                 {
                     skip++;
                     continue;
                 }
 
+                IPage? detailPage = null;
+
                 try
                 {
-                    await page.GotoAsync(link, new PageGotoOptions
+                    // ⚠️ Cria uma aba "descartável" apenas para esta vaga
+                    detailPage = await context.NewPageAsync();
+                    await detailPage.RouteAsync("**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf}", async route => await route.AbortAsync());
+
+                    await detailPage.GotoAsync(link, new PageGotoOptions
                     {
                         WaitUntil = WaitUntilState.DOMContentLoaded,
                         Timeout = 20_000
                     });
+
+                    await detailPage.WaitForSelectorAsync(".top-card-layout__title", new PageWaitForSelectorOptions { Timeout = 8000 });
+
+                    var titleEl = await detailPage.QuerySelectorAsync(".top-card-layout__title");
+                    var companyEl = await detailPage.QuerySelectorAsync(".topcard__org-name-link");
+                    var locationEl = await detailPage.QuerySelectorAsync(".topcard__flavor--bullet");
+                    var timeEl = await detailPage.QuerySelectorAsync(".posted-time-ago__text");
+                    var applicantsEl = await detailPage.QuerySelectorAsync(".num-applicants__caption");
+                    var descEl = await detailPage.QuerySelectorAsync(".description__text");
+                    var topCardEl = await detailPage.QuerySelectorAsync(".top-card-layout");
+                    string topText = topCardEl != null ? await topCardEl.InnerTextAsync() : "";
+
+                    var applyBtnEl = await detailPage.QuerySelectorAsync(".jobs-apply-button--top-card button, .jobs-apply-button, .jobs-s-apply button");
+                    string applyText = applyBtnEl != null ? await applyBtnEl.InnerTextAsync() : "";
+
+                    bool easyApply = topText.Contains("Candidatura simplificada", StringComparison.OrdinalIgnoreCase) ||
+                                     topText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase) ||
+                                     applyText.Contains("simplificada", StringComparison.OrdinalIgnoreCase) ||
+                                     applyText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
+
+                    var criteria = await detailPage.QuerySelectorAllAsync(".description__job-criteria-item");
+                    string empType = "";
+                    if (criteria.Count >= 2)
+                    {
+                        empType = await criteria[1].InnerTextAsync();
+                        empType = empType.Replace("Tipo de emprego", "").Replace("Employment type", "").Trim();
+                    }
+
+                    string titulo = titleEl != null ? (await titleEl.InnerTextAsync()).Trim() : "";
+                    string desc = descEl != null ? (await descEl.InnerTextAsync()).Trim() : "";
+                    string applicantsCount = applicantsEl != null ? (await applicantsEl.InnerTextAsync()).Trim() : "";
+
+                    var tituloLow = titulo.ToLowerInvariant();
+
+                    // 1. FILTRO BÁSICO (Lixo)
+                    bool ruim = tituloLow.Contains("suporte") ||
+                                tituloLow.Contains("help desk") ||
+                                tituloLow.Contains("vendas") ||
+                                tituloLow.Contains("atendimento") ||
+                                tituloLow.Contains("professor") ||
+                                tituloLow.Contains("tutor") ||
+                                tituloLow.Contains("analista de suporte");
+
+                    if (ruim || applicantsCount.Contains("Over 200 applicants", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation("🗑️  Filtrada (Lixo ou Concorrência alta): \"{Title}\"", titulo);
+                        filtradas++;
+                        continue;
+                    }
+
+                    // 2. FILTRO STRICT (O Cão de Guarda contra falsos positivos)
+                    if (isStrictSearch && requiredTerms.Count > 0)
+                    {
+                        bool temKeyword = false;
+                        foreach (var term in requiredTerms)
+                        {
+                            // A palavra tem que estar no título.
+                            // Tratamento especial pro C# porque o LinkedIn as vezes escreve C Sharp
+                            if (tituloLow.Contains(term) || (term == "c#" && tituloLow.Contains("c sharp")))
+                            {
+                                temKeyword = true;
+                                break;
+                            }
+                        }
+
+                        if (!temKeyword)
+                        {
+                            _logger.LogWarning("🛡️  Filtrada (Falso Positivo do LinkedIn): \"{Title}\" não contém as linguagens exigidas.", titulo);
+                            filtradas++;
+                            continue;
+                        }
+                    }
+
+                    string topTextLow = topText.ToLowerInvariant();
+                    string wpLabelReal = "";
+
+                    if (topTextLow.Contains("remoto") || topTextLow.Contains("remote"))
+                    {
+                        wpLabelReal = "Remoto";
+                    }
+                    else if (topTextLow.Contains("híbrido") || topTextLow.Contains("hybrid") || topTextLow.Contains("hibrido"))
+                    {
+                        wpLabelReal = "Híbrido";
+                    }
+                    else if (topTextLow.Contains("presencial") || topTextLow.Contains("on-site") || topTextLow.Contains("onsite"))
+                    {
+                        wpLabelReal = "Presencial";
+                    }
+                    else
+                    {
+                        wpLabelReal = wType == "2" ? "Remoto" : wType == "3" ? "Híbrido" : "Presencial";
+                    }
+                    string topTextLow = topText.ToLowerInvariant();
+                    string wpLabelReal = "";
+
+                    if (topTextLow.Contains("remoto") || topTextLow.Contains("remote"))
+                    {
+                        wpLabelReal = "Remoto";
+                    }
+                    else if (topTextLow.Contains("híbrido") || topTextLow.Contains("hybrid") || topTextLow.Contains("hibrido"))
+                    {
+                        wpLabelReal = "Híbrido";
+                    }
+                    else if (topTextLow.Contains("presencial") || topTextLow.Contains("on-site") || topTextLow.Contains("onsite"))
+                    {
+                        wpLabelReal = "Presencial";
+                    }
+                    else
+                    {
+                        wpLabelReal = wType == "2" ? "Remoto" : wType == "3" ? "Híbrido" : "Presencial";
+                    }
+                    bool workplaceValido = false;
+
+                    if (wType == "2")
+                    {
+                        workplaceValido = (wpLabelReal == "Remoto");
+                    }
+                    else if (wType == "3")
+                    {
+                        workplaceValido = (wpLabelReal == "Híbrido" || wpLabelReal == "Remoto");
+                    }
+                    else if (wType == "1")
+                    {
+                        workplaceValido = (wpLabelReal == "Presencial");
+                    }
+                    else
+                    {
+                        workplaceValido = true;
+                    }
+
+                    if (!workplaceValido)
+                    {
+                        _logger.LogInformation("🗑️  Filtrada (Modelo de trabalho incorreto): \"{Title}\" é {Real}, mas você pediu {Filtro}.", titulo, wpLabelReal, wType == "2" ? "Remoto" : "Híbrido");
+                        filtradas++;
+                        continue;
+                    }
+                    var novaVaga = new JobListing
+                    {
+                        LinkedInId = linkedId,
+                        Title = titulo != "" ? titulo : "Sem Título",
+                        Company = companyEl != null ? (await companyEl.InnerTextAsync()).Trim() : "Sem Empresa",
+                        Location = locationEl != null ? (await locationEl.InnerTextAsync()).Trim() : "Sem Local",
+                        WorkplaceType = wpLabelReal,
+                        EmploymentType = empType,
+                        IsEasyApply = easyApply,
+                        TimePosted = timeEl != null ? (await timeEl.InnerTextAsync()).Trim() : "",
+                        ApplicantCount = applicantsCount,
+                        Description = desc,
+                        Link = link
+                    };
+
+                    novasVagas.Add(novaVaga);
+                    novas++;
+                    _logger.LogInformation("✅ Nova: \"{Title}\" @ {Company}", novaVaga.Title, novaVaga.Company);
+
+                    await Task.Delay(500);
                 }
                 catch (TimeoutException)
                 {
-                    _logger.LogWarning("⏱️ Timeout no detalhe, pulando: {Link}", link);
+                    _logger.LogWarning("⏱️ Timeout ou bloqueio ao carregar detalhes da vaga, pulando: {Link}", link);
                     skip++;
                     continue;
                 }
-
-                await Task.Delay(1000);
-
-                var titleEl = await page.QuerySelectorAsync(".top-card-layout__title");
-                var companyEl = await page.QuerySelectorAsync(".topcard__org-name-link");
-                var locationEl = await page.QuerySelectorAsync(".topcard__flavor--bullet");
-                var timeEl = await page.QuerySelectorAsync(".posted-time-ago__text");
-                var applicantsEl = await page.QuerySelectorAsync(".num-applicants__caption");
-                var descEl = await page.QuerySelectorAsync(".description__text");
-                var topCardEl = await page.QuerySelectorAsync(".top-card-layout");
-                string topText = topCardEl != null ? await topCardEl.InnerTextAsync() : "";
-
-                bool easyApply = topText.Contains("Candidatura simplificada", StringComparison.OrdinalIgnoreCase) ||
-                                 topText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
-
-                var criteria = await page.QuerySelectorAllAsync(".description__job-criteria-item");
-                string empType = "";
-                if (criteria.Count >= 2)
+                catch (Exception ex)
                 {
-                    empType = await criteria[1].InnerTextAsync();
-                    empType = empType.Replace("Tipo de emprego", "").Replace("Employment type", "").Trim();
-                }
-
-                string titulo = titleEl != null ? (await titleEl.InnerTextAsync()).Trim() : "";
-                string desc = descEl != null ? (await descEl.InnerTextAsync()).Trim() : "";
-
-                // Pega a string de candidatos em texto limpo
-                string applicantsCount = applicantsEl != null ? (await applicantsEl.InnerTextAsync()).Trim() : "";
-
-                var tituloLow = titulo.ToLowerInvariant();
-                bool ruim = tituloLow.Contains("suporte") ||
-                            tituloLow.Contains("help desk") ||
-                            tituloLow.Contains("vendas") ||
-                            tituloLow.Contains("atendimento") ||
-                            tituloLow.Contains("professor") ||
-                            tituloLow.Contains("tutor") ||
-                            tituloLow.Contains("analista de suporte");
-
-                if (ruim)
-                {
-                    _logger.LogInformation("🗑️  Filtrada: \"{Title}\"", titulo);
-                    filtradas++;
+                    _logger.LogWarning("⚠️ Erro desconhecido ao processar vaga, pulando: {Link}. Erro: {Msg}", link, ex.Message);
+                    skip++;
                     continue;
                 }
-
-                // ========================================================
-                // NOVO FILTRO: Descarta se tiver mais de 200 candidatos
-                // ========================================================
-                if (applicantsCount.Contains("Over 200 applicants", StringComparison.OrdinalIgnoreCase))
+                finally
                 {
-                    _logger.LogInformation("🗑️  Filtrada (Concorrência muito alta): \"{Title}\" [{Applicants}]", titulo, applicantsCount);
-                    filtradas++;
-                    continue;
+                    // ⚠️ O SEGREDO DO HEROKU: Destrói a aba imediatamente após raspar a vaga
+                    if (detailPage != null)
+                    {
+                        try { await detailPage.CloseAsync(); } catch { /* ignore */ }
+                    }
                 }
-
-                string wpLabel = wType == "2" ? "Remoto" : wType == "3" ? "Híbrido" : "Presencial";
-
-                var novaVaga = new JobListing
-                {
-                    LinkedInId = linkedId,
-                    Title = titulo != "" ? titulo : "Sem Título",
-                    Company = companyEl != null ? (await companyEl.InnerTextAsync()).Trim() : "Sem Empresa",
-                    Location = locationEl != null ? (await locationEl.InnerTextAsync()).Trim() : "Sem Local",
-                    WorkplaceType = wpLabel,
-                    EmploymentType = empType,
-                    IsEasyApply = easyApply,
-                    TimePosted = timeEl != null ? (await timeEl.InnerTextAsync()).Trim() : "",
-                    ApplicantCount = applicantsCount, // Reaproveitamos a variável limpa
-                    Description = desc,
-                    Link = link
-                };
-
-                novasVagas.Add(novaVaga);
-                novas++;
-                _logger.LogInformation("✅ Nova: \"{Title}\" @ {Company}", novaVaga.Title, novaVaga.Company);
-
-                await Task.Delay(1500);
             }
 
-            // ── Single batch SaveChanges instead of one per job ──────────────
             if (novasVagas.Count > 0)
             {
                 db.Jobs.AddRange(novasVagas);
                 await db.SaveChangesAsync();
 
-                // Send push notifications after saving
                 foreach (var vaga in novasVagas)
                     await SendPushNotificationAsync(token, vaga);
             }
@@ -419,10 +530,9 @@ public class LinkedInScraperService : BackgroundService
         }
         finally
         {
-            // Always close page and context — browser stays alive for reuse
-            if (page != null)
+            if (listPage != null)
             {
-                try { await page.CloseAsync(); } catch { /* ignore */ }
+                try { await listPage.CloseAsync(); } catch { /* ignore */ }
             }
             if (context != null)
             {

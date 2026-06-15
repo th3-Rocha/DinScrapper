@@ -23,15 +23,12 @@ import {
   CheckCircle2,
   Pencil,
   Play,
+  Clock,
 } from "lucide-react-native";
+import Slider from "@react-native-community/slider";
 import { IS_DEV } from "../utils/environment";
 import { QRScanner } from "../components/qr-scanner";
-import {
-  useSettings,
-  JobSettings,
-  WorkplaceType,
-  ScrapeInterval,
-} from "../hooks/use-settings";
+import { useSettings, JobSettings, WorkplaceType } from "../hooks/use-settings";
 import { T } from "../constants/theme";
 
 const WORKPLACE_OPTIONS: {
@@ -46,90 +43,89 @@ const WORKPLACE_OPTIONS: {
 
 const CUSTOM_PRESET_VALUE = "__custom__";
 
-const KEYWORD_PRESETS: { label: string; value: string }[] = [
-  {
-    label: "C# / .NET Ecosystem",
-    value:
-      '("C#" OR ".NET" OR "ASP.NET" OR "Dotnet") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "Node.js / TypeScript",
-    value:
-      '("Node.js" OR "Node" OR "NestJS" OR "TypeScript") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "Java / Spring Boot",
-    value:
-      '("Java" OR "Spring") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "Python / Django / FastAPI",
-    value:
-      '("Python" OR "Django" OR "FastAPI" OR "Flask") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "Golang / Rust",
-    value:
-      '("Golang" OR "Go" OR "Rust") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "PHP / Laravel",
-    value:
-      '("PHP" OR "Laravel" OR "Symfony") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
-  {
-    label: "Ruby on Rails",
-    value:
-      '("Ruby" OR "Rails") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
-  },
+const KEYWORD_PRESETS: { label: string; value: string; isStrict?: boolean }[] =
+  [
+    // --- STRICT PRESETS (GOLD BORDER) ---
+    {
+      label: "C# / .NET (Strict)",
+      isStrict: true,
+      value:
+        'title:("C#" OR "C Sharp" OR "CSharp" OR ".NET" OR "ASP.NET" OR "ASPDotnet" OR "Dotnet" OR "Dot net" OR "Dot-net" OR ".NET Core")',
+    },
+    {
+      label: "Node.js / TS (Strict)",
+      isStrict: true,
+      value:
+        'title:("Node.js" OR "Node" OR "NestJS" OR "Nest" OR "TypeScript" OR "Express" OR "Fastify")',
+    },
+    {
+      label: "Java / Spring (Strict)",
+      isStrict: true,
+      value:
+        'title:("Java" OR "Spring" OR "SpringBoot" OR "Spring Boot" OR "Kotlin")',
+    },
+    {
+      label: "Python / Django (Strict)",
+      isStrict: true,
+      value: 'title:("Python" OR "Django" OR "FastAPI" OR "Flask")',
+    },
+    {
+      label: "Golang / Rust (Strict)",
+      isStrict: true,
+      value: 'title:("Golang" OR "Go" OR "Rust")',
+    },
 
-  {
-    label: "React Native / Mobile",
-    value:
-      'title:("React Native" OR "React-Native" OR "Mobile" OR "iOS" OR "Android")',
-  },
-  {
-    label: "Modern Frontend",
-    value:
-      '("React" OR "Next.js" OR "Vue" OR "Angular") title:("Frontend" OR "Front-end" OR "Developer" OR "Engineer")',
-  },
-  {
-    label: "Fullstack Developer",
-    value: 'title:("Fullstack" OR "Full-stack" OR "Full Stack")',
-  },
+    // --- BROAD PRESETS ---
+    {
+      label: "C# / .NET (Broad)",
+      value:
+        '("C#" OR "CSharp" OR ".NET" OR "ASP.NET" OR "Dotnet") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
+    },
+    {
+      label: "Node.js / TS (Broad)",
+      value:
+        '("Node.js" OR "Node" OR "NestJS" OR "TypeScript") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
+    },
+    {
+      label: "Java / Spring (Broad)",
+      value:
+        '("Java" OR "Spring") title:("Backend" OR "Developer" OR "Engineer" OR "Software")',
+    },
 
-  {
-    label: "Data Engineering",
-    value: 'title:("Data Engineer" OR "Data Engineering")',
-  },
-  {
-    label: "DevOps / SRE / Cloud",
-    value:
-      'title:("DevOps" OR "SRE" OR "Site Reliability" OR "Platform" OR "Cloud")',
-  },
-
-  {
-    label: "Junior / Entry-Level Backend",
-    value:
-      'title:("Junior" OR "Jr" OR "Entry") title:("Backend" OR "Developer" OR "Engineer")',
-  },
-  {
-    label: "International (English Required)",
-    value:
-      '"English" title:("Backend" OR "Software" OR "Developer" OR "Engineer")',
-  },
-  {
-    label: "Custom Query",
-    value: CUSTOM_PRESET_VALUE,
-  },
-];
-
-const SCRAPE_INTERVAL_OPTIONS: { value: ScrapeInterval; label: string }[] = [
-  { value: 15, label: "15 min" },
-  { value: 30, label: "30 min" },
-  { value: 60, label: "1 h" },
-  { value: 180, label: "3 h" },
-];
+    // --- OTHERS ---
+    {
+      label: "React Native / Mobile",
+      value:
+        'title:("React Native" OR "React-Native" OR "Mobile" OR "iOS" OR "Android" OR "Flutter")',
+    },
+    {
+      label: "Modern Frontend",
+      value:
+        '("React" OR "Next.js" OR "Vue" OR "Angular") title:("Frontend" OR "Front-end" OR "Developer" OR "Engineer")',
+    },
+    {
+      label: "Fullstack Developer",
+      value: 'title:("Fullstack" OR "Full-stack" OR "Full Stack")',
+    },
+    {
+      label: "Data Engineering",
+      value: 'title:("Data Engineer" OR "Data Engineering")',
+    },
+    {
+      label: "DevOps / SRE / Cloud",
+      value:
+        'title:("DevOps" OR "SRE" OR "Site Reliability" OR "Platform" OR "Cloud" OR "AWS" OR "Azure")',
+    },
+    {
+      label: "International (English Required)",
+      value:
+        '"English" title:("Backend" OR "Software" OR "Developer" OR "Engineer")',
+    },
+    {
+      label: "Custom Query",
+      value: CUSTOM_PRESET_VALUE,
+    },
+  ];
 
 export default function SettingsScreen() {
   const {
@@ -201,6 +197,14 @@ export default function SettingsScreen() {
       );
     }
   }, [form, saveSettings]);
+
+  // Formata os minutos do slider para "45 min" ou "1h 30m"
+  const formatInterval = (mins: number) => {
+    if (mins < 60) return `${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  };
 
   if (apiUrlLoading || loading) {
     return (
@@ -314,10 +318,20 @@ export default function SettingsScreen() {
           <View style={styles.chipsWrap}>
             {KEYWORD_PRESETS.map((preset) => {
               const active = keywordPreset === preset.value;
+              const strictStyle = preset.isStrict ? styles.chipStrict : {};
+              const strictActiveStyle = preset.isStrict
+                ? styles.chipStrictActive
+                : {};
+
               return (
                 <TouchableOpacity
                   key={preset.value}
-                  style={[styles.chip, active && styles.chipActive]}
+                  style={[
+                    styles.chip,
+                    strictStyle,
+                    active && styles.chipActive,
+                    active && strictActiveStyle,
+                  ]}
                   onPress={() => {
                     setKeywordPreset(preset.value);
                     if (preset.value !== CUSTOM_PRESET_VALUE) {
@@ -325,15 +339,18 @@ export default function SettingsScreen() {
                     } else if (
                       KEYWORD_PRESETS.some((p) => p.value === form.keywords)
                     ) {
-                      // Switching to Custom from a preset — clear the
-                      // field so it doesn't look like a stale preset.
                       setForm((f) => ({ ...f, keywords: "" }));
                     }
                   }}
                   activeOpacity={0.85}
                 >
                   <Text
-                    style={[styles.chipText, active && styles.chipTextActive]}
+                    style={[
+                      styles.chipText,
+                      preset.isStrict && styles.chipTextStrict,
+                      active && styles.chipTextActive,
+                      active && preset.isStrict && styles.chipTextStrictActive,
+                    ]}
                   >
                     {preset.label}
                   </Text>
@@ -409,32 +426,49 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Scrape interval */}
+        {/* Scrape Interval Slider */}
         <View style={styles.field}>
-          <Text style={styles.label}>Scrape interval</Text>
-          <View style={styles.segmentRow}>
-            {SCRAPE_INTERVAL_OPTIONS.map(({ value, label }) => {
-              const active = form.scrapeIntervalMinutes === value;
-              return (
-                <TouchableOpacity
-                  key={value}
-                  style={[styles.segment, active && styles.segmentActive]}
-                  onPress={() =>
-                    setForm((f) => ({ ...f, scrapeIntervalMinutes: value }))
-                  }
-                  activeOpacity={0.85}
-                >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      active && styles.segmentTextActive,
-                    ]}
-                  >
-                    {label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+          <View
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 12,
+            }}
+          >
+            <Text style={[styles.label, { marginBottom: 0 }]}>
+              Scrape interval
+            </Text>
+            <View style={styles.intervalBadge}>
+              <Clock size={12} color={T.accent} />
+              <Text style={styles.intervalBadgeText}>
+                {formatInterval(form.scrapeIntervalMinutes)}
+              </Text>
+            </View>
+          </View>
+
+          <Slider
+            style={{ width: "100%", height: 40 }}
+            minimumValue={10}
+            maximumValue={180}
+            step={5}
+            value={form.scrapeIntervalMinutes}
+            onValueChange={(val) =>
+              setForm((f) => ({ ...f, scrapeIntervalMinutes: val }))
+            }
+            minimumTrackTintColor={T.accent}
+            maximumTrackTintColor={T.glassBorder}
+            thumbTintColor={T.accent}
+          />
+          <View
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              paddingHorizontal: 5,
+            }}
+          >
+            <Text style={{ fontSize: 10, color: T.textMuted }}>10m</Text>
+            <Text style={{ fontSize: 10, color: T.textMuted }}>3h</Text>
           </View>
         </View>
 
@@ -486,6 +520,7 @@ export default function SettingsScreen() {
               {
                 color: scrapeResult.ok ? "#4ade80" : "#f87171",
                 marginBottom: 4,
+                marginTop: 8,
               },
             ]}
           >
@@ -496,7 +531,6 @@ export default function SettingsScreen() {
 
         {/* Push notification status */}
         <View style={styles.notifCard}>
-          {/* Status row */}
           <View style={styles.notifRow}>
             <View
               style={[
@@ -519,19 +553,16 @@ export default function SettingsScreen() {
             </Text>
           </View>
 
-          {/* Token preview */}
           {!IS_DEV && tokenPreview && (
             <Text style={styles.tokenPreview} numberOfLines={1}>
               {tokenPreview}
             </Text>
           )}
 
-          {/* Error reason */}
           {!IS_DEV && !tokenRegistered && tokenError && (
             <Text style={styles.notifError}>{tokenError}</Text>
           )}
 
-          {/* Register button (shown when not registered and not in dev mode) */}
           {!IS_DEV && !tokenRegistered && (
             <TouchableOpacity
               style={[styles.testButton, tokenSaving && { opacity: 0.6 }]}
@@ -549,7 +580,6 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           )}
 
-          {/* Send test button (shown when registered) */}
           {!IS_DEV && tokenRegistered && (
             <TouchableOpacity
               style={[styles.testButton, tokenSaving && { opacity: 0.6 }]}
@@ -567,12 +597,11 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           )}
 
-          {/* Feedback */}
           {testResult && (
             <Text
               style={[
                 styles.testResult,
-                { color: testResult.ok ? "#4ade80" : "#f87171" },
+                { color: testResult.ok ? "#4ade80" : "#f87171", marginTop: 4 },
               ]}
             >
               {testResult.ok ? "✓ " : "✗ "}
@@ -691,17 +720,31 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: T.glassBorder,
   },
+  chipStrict: {
+    borderColor: "rgba(250, 204, 21, 0.4)", // Dourado escurecido na borda
+    backgroundColor: "rgba(250, 204, 21, 0.05)",
+  },
   chipActive: {
     backgroundColor: T.accent,
     borderColor: T.accent,
+  },
+  chipStrictActive: {
+    backgroundColor: "#facc15", // Amarelo/Dourado preenchido
+    borderColor: "#facc15",
   },
   chipText: {
     fontSize: 12,
     fontWeight: "700",
     color: T.textSecondary,
   },
+  chipTextStrict: {
+    color: "rgba(250, 204, 21, 0.8)", // Texto dourado sutil
+  },
   chipTextActive: {
     color: "#000000",
+  },
+  chipTextStrictActive: {
+    color: "#000000", // Mantém preto para alto contraste
   },
   customKeywordsInput: {
     marginTop: 10,
@@ -734,6 +777,20 @@ const styles = StyleSheet.create({
   segmentTextActive: {
     color: "#000000",
   },
+  intervalBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 100,
+    gap: 5,
+  },
+  intervalBadgeText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T.accent,
+  },
   errorText: {
     color: T.danger,
     fontSize: 12,
@@ -761,13 +818,6 @@ const styles = StyleSheet.create({
     color: "#000000",
     fontWeight: "700",
     fontSize: 14,
-  },
-  note: {
-    fontSize: 11,
-    color: T.textMuted,
-    textAlign: "center",
-    marginTop: 14,
-    lineHeight: 16,
   },
   urlActionsCol: {
     gap: 8,

@@ -1,0 +1,29 @@
+name: Deploy para Heroku
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Login no Container Registry do Heroku
+        run: echo ${{ secrets.HEROKU_API_KEY }} | docker login --username=_ --password-stdin registry.heroku.com
+
+      - name: Build e Push para o Heroku
+        run: |
+          # O ponto no final do comando indica o contexto (a pasta backend)
+          docker build -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web ./backend
+          docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web
+
+      - name: Release no Heroku
+        run: |
+          curl -n -X PATCH https://api.heroku.com/apps/${{ secrets.HEROKU_APP_NAME }}/formation \
+          -H "Authorization: Bearer ${{ secrets.HEROKU_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"updates": [{"type": "web", "docker_image": "registry.heroku.com/'${{ secrets.HEROKU_APP_NAME }}'/web"}]}'
